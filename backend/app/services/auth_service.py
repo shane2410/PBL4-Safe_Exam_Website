@@ -1,3 +1,4 @@
+import logging
 from typing import Optional
 from fastapi import HTTPException, status
 from sqlalchemy.orm import Session
@@ -5,6 +6,8 @@ from app.core.security import verify_password, get_password_hash, create_access_
 from app.models.user import User
 from app.models.role import Role
 from app.schemas.auth_schema import LoginRequest, RegisterRequest, TokenResponse, UserResponse
+
+logger = logging.getLogger(__name__)
 
 class AuthService:
     @staticmethod
@@ -50,10 +53,17 @@ class AuthService:
                 status_code=status.HTTP_400_BAD_REQUEST,
                 detail="Email này đã được sử dụng"
             )
-        # Find role
-        role = db.query(Role).filter(Role.code == reg_data.role_code.upper()).first()
+        
+        # Strict role validation
+        target_role_code = reg_data.role_code.upper() if reg_data.role_code else "STUDENT"
+        role = db.query(Role).filter(Role.code == target_role_code).first()
         if not role:
             role = db.query(Role).filter(Role.code == "STUDENT").first()
+            if not role:
+                raise HTTPException(
+                    status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                    detail="Cấu hình vai trò người dùng trong hệ thống chưa được khởi tạo"
+                )
             
         user = User(
             username=reg_data.username,
@@ -64,7 +74,15 @@ class AuthService:
             student_code=reg_data.student_code,
             is_active=True
         )
-        db.add(user)
-        db.commit()
-        db.refresh(user)
-        return UserResponse.model_validate(user)
+        try:
+            db.add(user)
+            db.commit()
+            db.refresh(user)
+            return UserResponse.model_validate(user)
+        except Exception as e:
+            db.rollback()
+            logger.error("Error registering user %s: %s", reg_data.username, e, exc_info=True)
+            raise HTTPException(
+                status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                detail="Lỗi máy chủ nội bộ khi lưu thông tin người dùng"
+            )

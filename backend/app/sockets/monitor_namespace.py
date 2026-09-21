@@ -43,7 +43,8 @@ def register_monitor_socket_handlers():
 
             ExamSessionService.submit_exam(
                 db, session.session_token,
-                SubmitExamRequest(submit_type="AUTO_VIOLATION")
+                SubmitExamRequest(submit_type="AUTO_VIOLATION"),
+                skip_auth_check=True
             )
 
             # Find student sid if connected and emit force_submit
@@ -53,12 +54,14 @@ def register_monitor_socket_handlers():
                     break
 
             # Broadcast to monitor room
-            room_code = session.schedule.room_code
-            await sio.emit("student_force_submitted", {
-                "session_id": session_id,
-                "student_name": session.student.full_name,
-                "reason": reason
-            }, room=f"monitor_{room_code}")
+            room_code = session.schedule.room_code if session.schedule else ""
+            student_name = session.student.full_name if session.student else "Thí sinh"
+            if room_code:
+                await sio.emit("student_force_submitted", {
+                    "session_id": session_id,
+                    "student_name": student_name,
+                    "reason": reason
+                }, room=f"monitor_{room_code}")
 
             return {"status": "success"}
         finally:

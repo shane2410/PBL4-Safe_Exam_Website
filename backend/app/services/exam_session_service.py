@@ -1,9 +1,11 @@
+import logging
 import random
 import uuid
 from datetime import datetime, timedelta, timezone
-from typing import Dict, Any, List
+from typing import Dict, Any, List, Optional
 from fastapi import HTTPException, status
 from sqlalchemy.orm import Session, joinedload
+from sqlalchemy.exc import IntegrityError
 from app.models.exam_schedule import ExamSchedule
 from app.models.exam_session import ExamSession
 from app.models.exam import Exam
@@ -11,6 +13,7 @@ from app.models.exam_question import ExamQuestion
 from app.models.student_answer import StudentAnswer
 from app.models.question import Question
 from app.models.question_option import QuestionOption
+from app.models.user import User
 from app.schemas.question_schema import QuestionPublic, QuestionOptionPublic
 from app.schemas.exam_session_schema import (
     ExamTakingStateResponse, SaveAnswerRequest, SubmitExamRequest, ExamResultResponse
@@ -18,14 +21,16 @@ from app.schemas.exam_session_schema import (
 from app.dependencies.exam_time import check_exam_schedule_active
 from app.services.grading_service import GradingService
 
+logger = logging.getLogger(__name__)
+
 class ExamSessionService:
     @staticmethod
     def join_exam(
         db: Session,
         room_code: str,
         student_id: int,
-        ip_address: str = None,
-        user_agent: str = None
+        ip_address: Optional[str] = None,
+        user_agent: Optional[str] = None
     ) -> ExamTakingStateResponse:
         schedule = db.query(ExamSchedule).options(
             joinedload(ExamSchedule.exam).joinedload(Exam.exam_questions).joinedload(ExamQuestion.question).joinedload(Question.options)
@@ -37,6 +42,9 @@ class ExamSessionService:
         # Check time window
         check_exam_schedule_active(schedule)
         exam = schedule.exam
+        if not exam:
+            logger.error("Schedule %s has no linked exam", schedule.id)
+            raise HTTPException(status_code=500, detail="Đề thi liên kết với ca thi không tồn tại")
 
         # Check existing session
         session = db.query(ExamSession).filter(
@@ -56,11 +64,34 @@ class ExamSessionService:
                 ip_address=ip_address,
                 user_agent=user_agent
             )
-            db.add(session)
-            db.commit()
-            db.refresh(session)
-        elif session.status == "SUBMITTED":
-            raise HTTPException(status_code=400, detail="Bạn đã nộp bài thi này rồi")
+            try:
+                db.add(session)
+                db.commit()
+                db.refresh(session)
+            except IntegrityError:
+                # Handle concurrent join race condition gracefully
+                db.rollback()
+                session = db.query(ExamSession).filter(
+                    ExamSession.schedule_id == schedule.id,
+                    ExamSession.student_id == student_id
+                ).first()
+                if not session:
+                    logger.error("Failed to recover session for student %d in schedule %d", student_id, schedule.id)
+                    raise HTTPException(status_code=500, detail="Lỗi máy chủ nội bộ khi khởi tạo phiên thi")
+        else:
+            if session.status == "SUBMITTED":
+                raise HTTPException(status_code=400, detail="Bạn đã nộp bài thi này rồi")
+            # Update IP and user-agent on reconnect
+            if ip_address or user_agent:
+                if ip_address:
+                    session.ip_address = ip_address
+                if user_agent:
+                    session.user_agent = user_agent
+                try:
+                    db.commit()
+                except Exception as e:
+                    db.rollback()
+                    logger.warning("Failed to update reconnect client info for session %d: %s", session.id, e)
 
         # Calculate time remaining
         started_at = session.started_at
@@ -75,9 +106,17 @@ class ExamSessionService:
         effective_end = min(end_time_by_duration, schedule_end)
         remaining_seconds = max(0, int((effective_end - now).total_seconds()))
 
-        # If time is already over, trigger auto submit
+        # If time is already over, trigger auto submit gracefully
         if remaining_seconds <= 0:
-            ExamSessionService.submit_exam(db, session.session_token, SubmitExamRequest(submit_type="AUTO_TIMEOUT"))
+            try:
+                ExamSessionService.submit_exam(
+                    db, session.session_token,
+                    SubmitExamRequest(submit_type="AUTO_TIMEOUT"),
+                    current_user=None,
+                    skip_auth_check=True
+                )
+            except Exception as e:
+                logger.warning("Auto-submit on timeout failed for session %d: %s", session.id, e, exc_info=True)
             raise HTTPException(status_code=400, detail="Thời gian làm bài đã kết thúc")
 
         # Prepare Questions (Public schema - STRICTLY NO is_correct)
@@ -139,10 +178,23 @@ class ExamSessionService:
         )
 
     @staticmethod
-    def save_answer(db: Session, session_token: str, data: SaveAnswerRequest) -> dict:
+    def save_answer(
+        db: Session,
+        session_token: str,
+        data: SaveAnswerRequest,
+        current_user: User
+    ) -> dict:
         session = db.query(ExamSession).filter(ExamSession.session_token == session_token).first()
         if not session or session.status == "SUBMITTED":
             raise HTTPException(status_code=400, detail="Phiên thi không hợp lệ hoặc đã kết thúc")
+
+        # Security check: Verify ownership
+        user_role = current_user.role.code if current_user.role else "STUDENT"
+        if user_role == "STUDENT" and session.student_id != current_user.id:
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail="Bạn không có quyền thao tác trên phiên thi của thí sinh khác"
+            )
 
         ans = db.query(StudentAnswer).filter(
             StudentAnswer.session_id == session.id,
@@ -150,25 +202,36 @@ class ExamSessionService:
         ).first()
 
         now = datetime.now(timezone.utc)
-        if not ans:
-            ans = StudentAnswer(
-                session_id=session.id,
-                question_id=data.question_id,
-                selected_option_ids=data.selected_option_ids,
-                fill_blank_text=data.fill_blank_text,
-                updated_at=now
-            )
-            db.add(ans)
-        else:
-            ans.selected_option_ids = data.selected_option_ids
-            ans.fill_blank_text = data.fill_blank_text
-            ans.updated_at = now
+        try:
+            if not ans:
+                ans = StudentAnswer(
+                    session_id=session.id,
+                    question_id=data.question_id,
+                    selected_option_ids=data.selected_option_ids,
+                    fill_blank_text=data.fill_blank_text,
+                    updated_at=now
+                )
+                db.add(ans)
+            else:
+                ans.selected_option_ids = data.selected_option_ids
+                ans.fill_blank_text = data.fill_blank_text
+                ans.updated_at = now
 
-        db.commit()
-        return {"status": "saved", "question_id": data.question_id, "server_timestamp": now.isoformat()}
+            db.commit()
+            return {"status": "saved", "question_id": data.question_id, "server_timestamp": now.isoformat()}
+        except Exception as e:
+            db.rollback()
+            logger.error("Error saving answer for session %d, question %d: %s", session.id, data.question_id, e, exc_info=True)
+            raise HTTPException(status_code=500, detail="Lỗi máy chủ nội bộ khi lưu đáp án")
 
     @staticmethod
-    def submit_exam(db: Session, session_token: str, data: SubmitExamRequest) -> ExamResultResponse:
+    def submit_exam(
+        db: Session,
+        session_token: str,
+        data: SubmitExamRequest,
+        current_user: Optional[User] = None,
+        skip_auth_check: bool = False
+    ) -> ExamResultResponse:
         session = db.query(ExamSession).options(
             joinedload(ExamSession.student),
             joinedload(ExamSession.schedule).joinedload(ExamSchedule.exam)
@@ -176,25 +239,44 @@ class ExamSessionService:
 
         if not session:
             raise HTTPException(status_code=404, detail="Không tìm thấy phiên thi")
-            
-        if session.status != "SUBMITTED":
-            session.submitted_at = datetime.now(timezone.utc)
-            session.submit_type = data.submit_type
-            session.status = "SUBMITTED"
-            db.commit()
-            
-            # Grade immediately
-            GradingService.grade_session(db, session.id)
-            db.refresh(session)
 
-        exam = session.schedule.exam
+        # Security check: Verify ownership unless system trigger or admin/teacher
+        if not skip_auth_check and current_user:
+            user_role = current_user.role.code if current_user.role else "STUDENT"
+            if user_role == "STUDENT" and session.student_id != current_user.id:
+                raise HTTPException(
+                    status_code=status.HTTP_403_FORBIDDEN,
+                    detail="Bạn không có quyền nộp bài cho phiên thi của thí sinh khác"
+                )
+
+        try:
+            if session.status != "SUBMITTED":
+                session.submitted_at = datetime.now(timezone.utc)
+                session.submit_type = data.submit_type
+                session.status = "SUBMITTED"
+                db.commit()
+                
+                # Grade immediately
+                GradingService.grade_session(db, session.id)
+                db.refresh(session)
+        except Exception as e:
+            db.rollback()
+            logger.error("Error submitting exam for session %d: %s", session.id, e, exc_info=True)
+            raise HTTPException(status_code=500, detail="Lỗi máy chủ nội bộ khi nộp bài thi")
+
+        exam = session.schedule.exam if session.schedule else None
+        student_name = session.student.full_name if session.student else "Thí sinh (Đã xoá)"
+        student_code = session.student.student_code if session.student else "N/A"
+        exam_title = exam.title if exam else "Đề thi"
+        total_score_val = float(exam.total_score) if exam else 10.0
+
         return ExamResultResponse(
             session_id=session.id,
-            student_name=session.student.full_name,
-            student_code=session.student.student_code,
-            exam_title=exam.title,
+            student_name=student_name,
+            student_code=student_code,
+            exam_title=exam_title,
             final_score=float(session.final_score) if session.final_score is not None else 0.0,
-            total_score=float(exam.total_score),
+            total_score=total_score_val,
             submit_type=session.submit_type or "MANUAL",
             status=session.status,
             started_at=session.started_at,

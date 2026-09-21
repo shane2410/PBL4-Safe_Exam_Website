@@ -1,3 +1,4 @@
+import logging
 from typing import List, Optional
 from fastapi import HTTPException, status
 from sqlalchemy.orm import Session, joinedload
@@ -9,6 +10,8 @@ from app.schemas.exam_schema import (
     ExamCreate, ExamUpdate, ExamResponse, ExamDetailResponse,
     ExamScheduleCreate, ExamScheduleUpdate, ExamScheduleResponse
 )
+
+logger = logging.getLogger(__name__)
 
 class ExamService:
     @staticmethod
@@ -53,40 +56,10 @@ class ExamService:
             max_violation_allowed=data.max_violation_allowed,
             created_by=user_id
         )
-        db.add(exam)
-        db.flush()
+        try:
+            db.add(exam)
+            db.flush()
 
-        for q_item in data.questions:
-            db.add(ExamQuestion(
-                exam_id=exam.id,
-                question_id=q_item.question_id,
-                score=q_item.score,
-                order_index=q_item.order_index
-            ))
-            
-        db.commit()
-        db.refresh(exam)
-        return ExamService.get_exam_detail(db, exam.id)
-
-    @staticmethod
-    def update_exam(db: Session, exam_id: int, data: ExamUpdate) -> ExamDetailResponse:
-        exam = db.query(Exam).filter(Exam.id == exam_id).first()
-        if not exam:
-            raise HTTPException(status_code=404, detail="Không tìm thấy đề thi")
-            
-        if data.title is not None:
-            exam.title = data.title
-        if data.duration_minutes is not None:
-            exam.duration_minutes = data.duration_minutes
-        if data.total_score is not None:
-            exam.total_score = data.total_score
-        if data.is_shuffled is not None:
-            exam.is_shuffled = data.is_shuffled
-        if data.max_violation_allowed is not None:
-            exam.max_violation_allowed = data.max_violation_allowed
-
-        if data.questions is not None:
-            db.query(ExamQuestion).filter(ExamQuestion.exam_id == exam.id).delete()
             for q_item in data.questions:
                 db.add(ExamQuestion(
                     exam_id=exam.id,
@@ -95,18 +68,72 @@ class ExamService:
                     order_index=q_item.order_index
                 ))
                 
-        db.commit()
-        db.refresh(exam)
-        return ExamService.get_exam_detail(db, exam.id)
+            db.commit()
+            db.refresh(exam)
+            return ExamService.get_exam_detail(db, exam.id)
+        except Exception as e:
+            db.rollback()
+            logger.error("Error creating exam: %s", e, exc_info=True)
+            raise HTTPException(status_code=500, detail="Lỗi máy chủ nội bộ khi tạo đề thi")
+
+    @staticmethod
+    def update_exam(db: Session, exam_id: int, data: ExamUpdate) -> ExamDetailResponse:
+        exam = db.query(Exam).filter(Exam.id == exam_id).first()
+        if not exam:
+            raise HTTPException(status_code=404, detail="Không tìm thấy đề thi")
+            
+        try:
+            if data.title is not None:
+                exam.title = data.title
+            if data.duration_minutes is not None:
+                exam.duration_minutes = data.duration_minutes
+            if data.total_score is not None:
+                exam.total_score = data.total_score
+            if data.is_shuffled is not None:
+                exam.is_shuffled = data.is_shuffled
+            if data.max_violation_allowed is not None:
+                exam.max_violation_allowed = data.max_violation_allowed
+
+            if data.questions is not None:
+                db.query(ExamQuestion).filter(ExamQuestion.exam_id == exam.id).delete()
+                for q_item in data.questions:
+                    db.add(ExamQuestion(
+                        exam_id=exam.id,
+                        question_id=q_item.question_id,
+                        score=q_item.score,
+                        order_index=q_item.order_index
+                    ))
+                    
+            db.commit()
+            db.refresh(exam)
+            return ExamService.get_exam_detail(db, exam.id)
+        except Exception as e:
+            db.rollback()
+            logger.error("Error updating exam %d: %s", exam_id, e, exc_info=True)
+            raise HTTPException(status_code=500, detail="Lỗi máy chủ nội bộ khi cập nhật đề thi")
 
     @staticmethod
     def delete_exam(db: Session, exam_id: int) -> dict:
         exam = db.query(Exam).filter(Exam.id == exam_id).first()
         if not exam:
             raise HTTPException(status_code=404, detail="Không tìm thấy đề thi")
-        db.delete(exam)
-        db.commit()
-        return {"message": "Đã xoá đề thi thành công"}
+            
+        # Check if exam has existing schedules
+        active_schedules = db.query(ExamSchedule).filter(ExamSchedule.exam_id == exam_id).all()
+        if active_schedules:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="Không thể xoá đề thi đang được gắn vào ca thi. Vui lòng xoá hoặc huỷ các ca thi liên quan trước."
+            )
+
+        try:
+            db.delete(exam)
+            db.commit()
+            return {"message": "Đã xoá đề thi thành công"}
+        except Exception as e:
+            db.rollback()
+            logger.error("Error deleting exam %d: %s", exam_id, e, exc_info=True)
+            raise HTTPException(status_code=500, detail="Lỗi máy chủ nội bộ khi xoá đề thi")
 
     # --- Schedules ---
     @staticmethod
@@ -122,10 +149,18 @@ class ExamService:
 
     @staticmethod
     def create_schedule(db: Session, data: ExamScheduleCreate, user_id: int) -> ExamScheduleResponse:
+        # Validate end_time > start_time
+        if data.end_time <= data.start_time:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="Thời gian kết thúc (end_time) phải sau thời gian bắt đầu (start_time)"
+            )
+
         # Check exam
         exam = db.query(Exam).filter(Exam.id == data.exam_id).first()
         if not exam:
             raise HTTPException(status_code=404, detail="Đề thi không tồn tại")
+            
         # Check duplicate room code
         existing = db.query(ExamSchedule).filter(ExamSchedule.room_code == data.room_code.upper()).first()
         if existing:
@@ -139,24 +174,43 @@ class ExamService:
             supervised_by=user_id,
             status=data.status
         )
-        db.add(schedule)
-        db.commit()
-        db.refresh(schedule)
-        return ExamScheduleResponse.model_validate(schedule)
+        try:
+            db.add(schedule)
+            db.commit()
+            db.refresh(schedule)
+            return ExamScheduleResponse.model_validate(schedule)
+        except Exception as e:
+            db.rollback()
+            logger.error("Error creating exam schedule: %s", e, exc_info=True)
+            raise HTTPException(status_code=500, detail="Lỗi máy chủ nội bộ khi tạo ca thi")
 
     @staticmethod
     def update_schedule(db: Session, schedule_id: int, data: ExamScheduleUpdate) -> ExamScheduleResponse:
         schedule = db.query(ExamSchedule).filter(ExamSchedule.id == schedule_id).first()
         if not schedule:
             raise HTTPException(status_code=404, detail="Không tìm thấy ca thi")
-        if data.room_code is not None:
-            schedule.room_code = data.room_code.upper()
-        if data.start_time is not None:
-            schedule.start_time = data.start_time
-        if data.end_time is not None:
-            schedule.end_time = data.end_time
-        if data.status is not None:
-            schedule.status = data.status
-        db.commit()
-        db.refresh(schedule)
-        return ExamScheduleResponse.model_validate(schedule)
+            
+        new_start = data.start_time if data.start_time is not None else schedule.start_time
+        new_end = data.end_time if data.end_time is not None else schedule.end_time
+        if new_end <= new_start:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="Thời gian kết thúc (end_time) phải sau thời gian bắt đầu (start_time)"
+            )
+
+        try:
+            if data.room_code is not None:
+                schedule.room_code = data.room_code.upper()
+            if data.start_time is not None:
+                schedule.start_time = data.start_time
+            if data.end_time is not None:
+                schedule.end_time = data.end_time
+            if data.status is not None:
+                schedule.status = data.status
+            db.commit()
+            db.refresh(schedule)
+            return ExamScheduleResponse.model_validate(schedule)
+        except Exception as e:
+            db.rollback()
+            logger.error("Error updating exam schedule %d: %s", schedule_id, e, exc_info=True)
+            raise HTTPException(status_code=500, detail="Lỗi máy chủ nội bộ khi cập nhật ca thi")

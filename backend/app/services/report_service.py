@@ -1,3 +1,4 @@
+import logging
 from io import BytesIO
 from datetime import datetime
 from typing import List, Optional
@@ -15,9 +16,12 @@ from app.models.exam_session import ExamSession
 from app.models.violation_log import ViolationLog
 from app.schemas.report_schema import ExamScheduleStatistics, StudentResultItem
 
+logger = logging.getLogger(__name__)
+
 class ReportService:
     @staticmethod
     def get_schedule_statistics(db: Session, schedule_id: int) -> ExamScheduleStatistics:
+        logger.debug("Generating statistics for schedule ID %d", schedule_id)
         schedule = db.query(ExamSchedule).options(
             joinedload(ExamSchedule.exam),
             joinedload(ExamSchedule.sessions).joinedload(ExamSession.student),
@@ -25,7 +29,11 @@ class ReportService:
         ).filter(ExamSchedule.id == schedule_id).first()
         
         if not schedule:
+            logger.warning("Schedule ID %d not found when generating statistics", schedule_id)
             raise HTTPException(status_code=404, detail="Không tìm thấy ca thi")
+
+        exam_title = schedule.exam.title if schedule.exam else "Đề thi không xác định"
+        total_score_val = float(schedule.exam.total_score) if schedule.exam else 10.0
 
         candidates = []
         scores = []
@@ -35,18 +43,24 @@ class ReportService:
             if f_score is not None:
                 scores.append(f_score)
 
+            # Safe access for student fields (handling potential None if student was removed)
+            student_id = s.student.id if s.student else s.student_id
+            student_name = s.student.full_name if s.student else "Thí sinh (Đã xoá)"
+            student_code = s.student.student_code if s.student else "N/A"
+            email = s.student.email if s.student else "N/A"
+
             candidates.append(StudentResultItem(
                 session_id=s.id,
-                student_id=s.student.id,
-                student_name=s.student.full_name,
-                student_code=s.student.student_code,
-                email=s.student.email,
+                student_id=student_id,
+                student_name=student_name,
+                student_code=student_code,
+                email=email,
                 started_at=s.started_at,
                 submitted_at=s.submitted_at,
                 submit_type=s.submit_type,
                 status=s.status,
                 final_score=f_score,
-                total_score=float(schedule.exam.total_score),
+                total_score=total_score_val,
                 risk_score=s.risk_score,
                 tab_switch_count=s.tab_switch_count,
                 fullscreen_exit_count=s.fullscreen_exit_count,
@@ -63,7 +77,7 @@ class ReportService:
         return ExamScheduleStatistics(
             schedule_id=schedule.id,
             room_code=schedule.room_code,
-            exam_title=schedule.exam.title,
+            exam_title=exam_title,
             total_candidates=total_cand,
             submitted_count=submitted,
             in_progress_count=in_prog,
@@ -75,6 +89,7 @@ class ReportService:
 
     @staticmethod
     def export_excel(db: Session, schedule_id: int) -> BytesIO:
+        logger.info("Exporting Excel report for schedule ID %d", schedule_id)
         stats = ReportService.get_schedule_statistics(db, schedule_id)
         
         wb = openpyxl.Workbook()
@@ -160,6 +175,7 @@ class ReportService:
 
     @staticmethod
     def export_pdf(db: Session, schedule_id: int) -> BytesIO:
+        logger.info("Exporting PDF report for schedule ID %d", schedule_id)
         stats = ReportService.get_schedule_statistics(db, schedule_id)
         
         output = BytesIO()

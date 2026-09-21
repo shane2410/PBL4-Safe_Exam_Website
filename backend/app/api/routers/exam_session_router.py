@@ -42,8 +42,8 @@ def save_answer(
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user)
 ):
-    """Auto-save an individual answer for the active session."""
-    return ExamSessionService.save_answer(db, session_token, data)
+    """Auto-save an individual answer for the active session (verifies user ownership)."""
+    return ExamSessionService.save_answer(db, session_token, data, current_user=current_user)
 
 @router.post("/submit", response_model=ExamResultResponse)
 def submit_exam(
@@ -52,8 +52,8 @@ def submit_exam(
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user)
 ):
-    """Submit exam, finalize session, and trigger automatic grading."""
-    return ExamSessionService.submit_exam(db, session_token, data)
+    """Submit exam, finalize session, and trigger automatic grading (verifies user ownership)."""
+    return ExamSessionService.submit_exam(db, session_token, data, current_user=current_user)
 
 @router.get("/my-results", response_model=List[ExamResultResponse])
 def get_my_results(
@@ -71,14 +71,19 @@ def get_my_results(
 
     results = []
     for s in sessions:
-        exam = s.schedule.exam
+        exam = s.schedule.exam if s.schedule else None
+        student_name = s.student.full_name if s.student else "Thí sinh"
+        student_code = s.student.student_code if s.student else "N/A"
+        exam_title = exam.title if exam else "Đề thi"
+        total_score_val = float(exam.total_score) if exam else 10.0
+
         results.append(ExamResultResponse(
             session_id=s.id,
-            student_name=s.student.full_name,
-            student_code=s.student.student_code,
-            exam_title=exam.title,
+            student_name=student_name,
+            student_code=student_code,
+            exam_title=exam_title,
             final_score=float(s.final_score) if s.final_score is not None else 0.0,
-            total_score=float(exam.total_score),
+            total_score=total_score_val,
             submit_type=s.submit_type or "MANUAL",
             status=s.status,
             started_at=s.started_at,

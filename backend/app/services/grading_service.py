@@ -1,3 +1,4 @@
+import logging
 from typing import Optional
 from sqlalchemy.orm import Session, joinedload
 from app.models.exam_session import ExamSession
@@ -5,6 +6,8 @@ from app.models.exam_question import ExamQuestion
 from app.models.student_answer import StudentAnswer
 from app.models.question import Question
 from app.models.question_option import QuestionOption
+
+logger = logging.getLogger(__name__)
 
 class GradingService:
     @staticmethod
@@ -15,7 +18,8 @@ class GradingService:
             joinedload(ExamSession.answers).joinedload(StudentAnswer.question).joinedload(Question.options)
         ).filter(ExamSession.id == session_id).first()
         
-        if not session:
+        if not session or not session.schedule or not session.schedule.exam_id:
+            logger.warning("Session %s missing or has no associated schedule/exam for grading", session_id)
             return 0.0
 
         # Build map of question_id -> score in exam
@@ -40,9 +44,17 @@ class GradingService:
                 if len(selected_ids) == 1 and selected_ids[0] in correct_option_ids:
                     earned_q_score = max_q_score
             elif question.type == "MULTI_CHOICE":
-                # Check exact set match
-                if set(selected_ids) == set(correct_option_ids):
-                    earned_q_score = max_q_score
+                correct_set = set(correct_option_ids)
+                selected_set = set(selected_ids)
+                if correct_set:
+                    true_positives = len(correct_set.intersection(selected_set))
+                    false_positives = len(selected_set.difference(correct_set))
+                    if false_positives >= true_positives:
+                        earned_q_score = 0.0
+                    else:
+                        # Partial credit formula: (True Positives - False Positives) / Total Correct
+                        ratio = max(0.0, (true_positives - false_positives) / len(correct_set))
+                        earned_q_score = round(max_q_score * ratio, 2)
             elif question.type == "FILL_BLANK":
                 user_text = (ans.fill_blank_text or "").strip().lower()
                 correct_texts = [opt.content.strip().lower() for opt in question.options if opt.is_correct]
@@ -54,5 +66,10 @@ class GradingService:
 
         final_score = round(total_earned, 2)
         session.final_score = final_score
-        db.commit()
+        try:
+            db.commit()
+        except Exception as e:
+            db.rollback()
+            logger.error("Error committing grades for session %d: %s", session_id, e, exc_info=True)
+            raise
         return final_score

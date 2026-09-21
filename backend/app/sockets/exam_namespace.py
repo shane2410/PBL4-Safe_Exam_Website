@@ -34,13 +34,16 @@ def register_exam_socket_handlers():
             room_name = f"room_{room_code.upper()}"
             await sio.enter_room(sid, room_name)
 
+            student_name = session.student.full_name if session.student else "Thí sinh"
+            student_code = session.student.student_code if session.student else "N/A"
+
             active_sockets[sid] = {
                 "session_token": session_token,
                 "session_id": session.id,
                 "room_code": room_code.upper(),
                 "student_id": session.student_id,
-                "student_name": session.student.full_name,
-                "student_code": session.student.student_code,
+                "student_name": student_name,
+                "student_code": student_code,
                 "last_heartbeat": datetime.now(timezone.utc).isoformat()
             }
 
@@ -49,8 +52,8 @@ def register_exam_socket_handlers():
             await sio.emit("student_status_change", {
                 "session_id": session.id,
                 "student_id": session.student_id,
-                "student_name": session.student.full_name,
-                "student_code": session.student.student_code,
+                "student_name": student_name,
+                "student_code": student_code,
                 "status": "ONLINE",
                 "risk_score": session.risk_score,
                 "tab_switch_count": session.tab_switch_count,
@@ -105,32 +108,34 @@ def register_exam_socket_handlers():
             v_log, exceeded = AnticheatService.record_violation(db, session_id, v_create)
             if v_log:
                 session = db.query(ExamSession).filter(ExamSession.id == session_id).first()
-                
-                # Broadcast violation alert to teacher monitor room
-                monitor_room = f"monitor_{room_code}"
-                await sio.emit("violation_alert", {
-                    "session_id": session_id,
-                    "student_name": sock_info["student_name"],
-                    "student_code": sock_info["student_code"],
-                    "event_type": event_type,
-                    "severity": severity,
-                    "detail": detail,
-                    "risk_score": session.risk_score,
-                    "tab_switch_count": session.tab_switch_count,
-                    "fullscreen_exit_count": session.fullscreen_exit_count,
-                    "timestamp": datetime.now(timezone.utc).isoformat()
-                }, room=monitor_room)
+                if session:
+                    # Broadcast violation alert to teacher monitor room
+                    monitor_room = f"monitor_{room_code}"
+                    await sio.emit("violation_alert", {
+                        "session_id": session_id,
+                        "student_name": sock_info["student_name"],
+                        "student_code": sock_info["student_code"],
+                        "event_type": event_type,
+                        "severity": severity,
+                        "detail": detail,
+                        "risk_score": session.risk_score,
+                        "tab_switch_count": session.tab_switch_count,
+                        "fullscreen_exit_count": session.fullscreen_exit_count,
+                        "timestamp": datetime.now(timezone.utc).isoformat()
+                    }, room=monitor_room)
 
-                # If threshold exceeded, force submit exam
-                if exceeded:
-                    ExamSessionService.submit_exam(
-                        db, session.session_token,
-                        SubmitExamRequest(submit_type="AUTO_VIOLATION")
-                    )
-                    # Notify student client to lock and submit
-                    await sio.emit("force_submit", {
-                        "reason": f"Vượt quá số lần vi phạm an toàn cho phép ({session.schedule.exam.max_violation_allowed} lần). Bài thi đã tự động nộp."
-                    }, to=sid)
+                    # If threshold exceeded, force submit exam
+                    if exceeded:
+                        ExamSessionService.submit_exam(
+                            db, session.session_token,
+                            SubmitExamRequest(submit_type="AUTO_VIOLATION"),
+                            skip_auth_check=True
+                        )
+                        max_limit = session.schedule.exam.max_violation_allowed if session.schedule and session.schedule.exam else 5
+                        # Notify student client to lock and submit
+                        await sio.emit("force_submit", {
+                            "reason": f"Vượt quá số lần vi phạm an toàn cho phép ({max_limit} lần). Bài thi đã tự động nộp."
+                        }, to=sid)
                     
             return {"status": "ok", "threshold_exceeded": exceeded}
         finally:
