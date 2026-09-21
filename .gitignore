@@ -1,0 +1,65 @@
+# Documentation / Specification files
+design.md
+skills.md
+SRS_He_thong_thi_truc_tuyen_v2.docx
+*.docx
+SRS*
+
+# Environment & Secrets
+.env
+.env.*
+!.env.example
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+env/
+venv/
+.venv/
+ENV/
+build/
+develop-eggs/
+dist/
+downloads/
+eggs/
+.eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+wheels/
+*.egg-info/
+.installed.cfg
+*.egg
+.pytest_cache/
+.coverage
+htmlcov/
+
+# Node & Frontend
+node_modules/
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+pnpm-debug.log*
+lerna-debug.log*
+frontend/dist/
+frontend/dist-ssr/
+frontend/.vite/
+*.local
+
+# Logs and databases
+*.log
+*.sqlite
+*.sqlite3
+
+# IDE & OS
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/
+*.swp
+*.swo
