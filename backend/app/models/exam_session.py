@@ -23,8 +23,14 @@ class ExamSession(Base):
     final_score = Column(Numeric(5, 2), nullable=True)
     ip_address = Column(String(45), nullable=True)
     user_agent = Column(String(255), nullable=True)
+    # --- Thông tin client (Phase 0/1) ---
+    client_type = Column(String(20), default="web", nullable=False)  # web | seb
+    client_version = Column(String(20), nullable=True)
+    device_fingerprint = Column(String(128), nullable=True)
+    attestation_status = Column(String(20), default="NOT_ATTESTED", nullable=False)  # NOT_ATTESTED | VERIFIED | FAILED | REQUIRED_MISSING
 
     schedule = relationship("ExamSchedule", back_populates="sessions")
     student = relationship("User", back_populates="exam_sessions")
     answers = relationship("StudentAnswer", back_populates="session", cascade="all, delete-orphan")
     violation_logs = relationship("ViolationLog", back_populates="session", cascade="all, delete-orphan")
+    attestations = relationship("ClientAttestation", back_populates="session", cascade="all, delete-orphan")

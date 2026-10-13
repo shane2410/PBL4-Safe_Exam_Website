@@ -10,6 +10,7 @@ from app.schemas.exam_schema import (
     ExamCreate, ExamUpdate, ExamResponse, ExamDetailResponse,
     ExamScheduleCreate, ExamScheduleUpdate, ExamScheduleResponse
 )
+from app.services.exam_security_service import ExamSecurityService
 
 logger = logging.getLogger(__name__)
 
@@ -31,13 +32,15 @@ class ExamService:
     @staticmethod
     def get_exam_detail(db: Session, exam_id: int) -> ExamDetailResponse:
         exam = db.query(Exam).options(
-            joinedload(Exam.exam_questions).joinedload(ExamQuestion.question)
+            joinedload(Exam.exam_questions).joinedload(ExamQuestion.question),
+            joinedload(Exam.security_config)
         ).filter(Exam.id == exam_id).first()
         if not exam:
             raise HTTPException(status_code=404, detail="Không tìm thấy đề thi")
-        
+
         res = ExamDetailResponse.model_validate(exam)
         res.question_count = len(exam.exam_questions)
+        res.security_config = ExamSecurityService.resolve_policy(db, exam_id)
         return res
 
     @staticmethod
@@ -46,7 +49,7 @@ class ExamService:
         subject = db.query(Subject).filter(Subject.id == data.subject_id).first()
         if not subject:
             raise HTTPException(status_code=404, detail="Môn học không tồn tại")
-            
+
         exam = Exam(
             title=data.title,
             subject_id=data.subject_id,
@@ -54,6 +57,7 @@ class ExamService:
             total_score=data.total_score,
             is_shuffled=data.is_shuffled,
             max_violation_allowed=data.max_violation_allowed,
+            require_safe_browser=data.require_safe_browser,
             created_by=user_id
         )
         try:
@@ -67,7 +71,11 @@ class ExamService:
                     score=q_item.score,
                     order_index=q_item.order_index
                 ))
-                
+
+            # Lưu cấu hình khoá an toàn riêng cho đề nếu GV có gửi kèm
+            if data.security_config:
+                ExamSecurityService.save_config(db, exam.id, data.security_config)
+
             db.commit()
             db.refresh(exam)
             return ExamService.get_exam_detail(db, exam.id)
@@ -81,7 +89,7 @@ class ExamService:
         exam = db.query(Exam).filter(Exam.id == exam_id).first()
         if not exam:
             raise HTTPException(status_code=404, detail="Không tìm thấy đề thi")
-            
+
         try:
             if data.title is not None:
                 exam.title = data.title
@@ -93,6 +101,11 @@ class ExamService:
                 exam.is_shuffled = data.is_shuffled
             if data.max_violation_allowed is not None:
                 exam.max_violation_allowed = data.max_violation_allowed
+            if data.require_safe_browser is not None:
+                exam.require_safe_browser = data.require_safe_browser
+
+            if data.security_config is not None:
+                ExamSecurityService.save_config(db, exam.id, data.security_config)
 
             if data.questions is not None:
                 db.query(ExamQuestion).filter(ExamQuestion.exam_id == exam.id).delete()

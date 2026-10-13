@@ -1,11 +1,16 @@
-from fastapi import APIRouter, Depends, status
+from fastapi import APIRouter, Depends, status, Query
 from fastapi.security import OAuth2PasswordRequestForm
 from sqlalchemy.orm import Session
 from app.core.database import get_db
 from app.dependencies.auth import get_current_user
+from app.dependencies.client_identity import get_client_identity, ClientIdentity
 from app.models.user import User
 from app.schemas.auth_schema import LoginRequest, RegisterRequest, TokenResponse, UserResponse
+from app.schemas.client_attestation_schema import (
+    ClientAttestRequest, ClientAttestResponse, ClientNonceResponse
+)
 from app.services.auth_service import AuthService
+from app.services.attestation_service import AttestationService
 
 router = APIRouter(prefix="/auth", tags=["Authentication"])
 
@@ -32,3 +37,37 @@ def register(reg_data: RegisterRequest, db: Session = Depends(get_db)):
 def get_current_user_profile(current_user: User = Depends(get_current_user)):
     """Get profile of current logged-in user."""
     return UserResponse.model_validate(current_user)
+
+
+# --- Client attestation (Phase 0 — xác thực Safe Exam Browser Client) ---
+# Xem docs/PLAN.md mục 0.3. Web client KHÔNG cần gọi 2 endpoint này.
+
+@router.post("/client-nonce", response_model=ClientNonceResponse)
+def request_client_nonce(
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user)
+):
+    """Bước 1/2 của challenge-response: server cấp nonce dùng 1 lần, hạn 30 giây.
+
+    Endpoint này KHÔNG tiết lộ gì bí mật — nó chỉ chứng minh web client cần policy.
+    Chỉ khi bước 2 thành công thì mới xác lập được `attestation_key`.
+    """
+    nonce, ttl = AttestationService.issue_nonce(db, current_user)
+    return {"nonce": nonce, "expires_in": ttl}
+
+
+@router.post("/client-attest", response_model=ClientAttestResponse)
+def attest_client(
+    payload: ClientAttestRequest,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user)
+):
+    """Bước 2/2: client gửi chữ ký HMAC-SHA256 để chứng minh là SEB Client thật.
+
+    message   = "nonce|client_version|device_fingerprint"
+    signature = base64(HMAC-SHA256(message, device_secret))
+
+    Server trả `attestation_key` khi chữ ký hợp lệ — khoá này chỉ được trả
+    đúng một lần và dùng để ký các heartbeat sau (Phase 1).
+    """
+    return AttestationService.verify_attestation(db, current_user, payload)

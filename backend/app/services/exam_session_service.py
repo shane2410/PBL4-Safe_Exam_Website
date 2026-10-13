@@ -1,11 +1,14 @@
 import logging
 import random
+import secrets
 import uuid
 from datetime import datetime, timedelta, timezone
 from typing import Dict, Any, List, Optional
 from fastapi import HTTPException, status
 from sqlalchemy.orm import Session, joinedload
 from sqlalchemy.exc import IntegrityError
+from app.core.security import to_utc_naive
+from app.dependencies.client_identity import ClientIdentity
 from app.models.exam_schedule import ExamSchedule
 from app.models.exam_session import ExamSession
 from app.models.exam import Exam
@@ -18,10 +21,29 @@ from app.schemas.question_schema import QuestionPublic, QuestionOptionPublic
 from app.schemas.exam_session_schema import (
     ExamTakingStateResponse, SaveAnswerRequest, SubmitExamRequest, ExamResultResponse
 )
+from app.schemas.violation_schema import ViolationLogCreate, resolve_severity
 from app.dependencies.exam_time import check_exam_schedule_active
 from app.services.grading_service import GradingService
+from app.services.exam_security_service import ExamSecurityService
+from app.services.anticheat_service import AnticheatService
 
 logger = logging.getLogger(__name__)
+
+ALLOWED_SUBMIT_TYPES = {"MANUAL", "SHUTDOWN_BUTTON", "AUTO_TIMEOUT", "AUTO_VIOLATION"}
+
+
+def _get_deadline(session: ExamSession, schedule: ExamSchedule) -> datetime:
+    """Mốc chót nộp bài theo đồng hồ SERVER (skills.md Quy tắc #4.1).
+
+    = min(thời điểm bắt đầu + thời lượng đề, thời điểm kết thúc ca thi)
+    Trả về datetime UTC-naive để so sánh với `datetime.now(timezone.utc)` đã bỏ tz.
+    """
+    started_at = to_utc_naive(session.started_at)
+    exam_duration = schedule.exam.duration_minutes if schedule.exam else 0
+    end_by_duration = started_at + timedelta(minutes=exam_duration)
+    schedule_end = to_utc_naive(schedule.end_time)
+    return min(end_by_duration, schedule_end)
+
 
 class ExamSessionService:
     @staticmethod
@@ -30,21 +52,33 @@ class ExamSessionService:
         room_code: str,
         student_id: int,
         ip_address: Optional[str] = None,
-        user_agent: Optional[str] = None
+        user_agent: Optional[str] = None,
+        client_identity: Optional[ClientIdentity] = None,
     ) -> ExamTakingStateResponse:
+        identity = client_identity or ClientIdentity()
         schedule = db.query(ExamSchedule).options(
             joinedload(ExamSchedule.exam).joinedload(Exam.exam_questions).joinedload(ExamQuestion.question).joinedload(Question.options)
         ).filter(ExamSchedule.room_code == room_code.upper()).first()
-        
+
         if not schedule:
             raise HTTPException(status_code=404, detail="Không tìm thấy phòng thi với mã đã nhập")
-            
+
         # Check time window
         check_exam_schedule_active(schedule)
         exam = schedule.exam
         if not exam:
             logger.error("Schedule %s has no linked exam", schedule.id)
             raise HTTPException(status_code=500, detail="Đề thi liên kết với ca thi không tồn tại")
+
+        # --- Phase 0: áp dụng chính sách khoá an toàn ---
+        policy = ExamSecurityService.resolve_policy(db, exam.id)
+        seb_required = ExamSecurityService.is_safe_browser_required(db, exam)
+
+        # Client tự khai là SEB thì vẫn phải được xác thực bằng challenge-response.
+        # Nếu chưa attest -> coi như web thường (không tin lời khai của client).
+        claims_seb = identity.is_seb
+        is_verified_seb = claims_seb and identity.attested
+        restricted_mode = seb_required and not is_verified_seb
 
         # Check existing session
         session = db.query(ExamSession).filter(
@@ -55,6 +89,10 @@ class ExamSessionService:
         now = datetime.now(timezone.utc)
         if not session:
             token = f"sess_{uuid.uuid4().hex}"
+            attestation_status = "VERIFIED" if is_verified_seb else "NOT_ATTESTED"
+            if seb_required and not is_verified_seb:
+                attestation_status = "REQUIRED_MISSING"
+
             session = ExamSession(
                 schedule_id=schedule.id,
                 student_id=student_id,
@@ -62,7 +100,11 @@ class ExamSessionService:
                 started_at=now,
                 status="IN_PROGRESS",
                 ip_address=ip_address,
-                user_agent=user_agent
+                user_agent=user_agent,
+                client_type="seb" if is_verified_seb else "web",
+                client_version=identity.client_version,
+                device_fingerprint=identity.device_fingerprint,
+                attestation_status=attestation_status,
             )
             try:
                 db.add(session)
@@ -78,6 +120,7 @@ class ExamSessionService:
                 if not session:
                     logger.error("Failed to recover session for student %d in schedule %d", student_id, schedule.id)
                     raise HTTPException(status_code=500, detail="Lỗi máy chủ nội bộ khi khởi tạo phiên thi")
+
         else:
             if session.status == "SUBMITTED":
                 raise HTTPException(status_code=400, detail="Bạn đã nộp bài thi này rồi")
@@ -87,24 +130,66 @@ class ExamSessionService:
                     session.ip_address = ip_address
                 if user_agent:
                     session.user_agent = user_agent
+            # Reconnect bằng client khác -> cập nhật thông tin client, nếu đã xác thực
+            # thì nâng trạng thái lại tương ứng (VD: GV mới bật cờ giữa kỳ thi).
+            session.client_type = "seb" if is_verified_seb else "web"
+            session.client_version = identity.client_version or session.client_version
+            session.device_fingerprint = identity.device_fingerprint or session.device_fingerprint
+            if is_verified_seb:
+                session.attestation_status = "VERIFIED"
+            elif seb_required:
+                session.attestation_status = "REQUIRED_MISSING"
+            try:
+                db.commit()
+            except Exception as e:
+                db.rollback()
+                logger.warning("Failed to update reconnect client info for session %d: %s", session.id, e)
+
+        # Ghi vết client đã xác thực vào CHÍNH phiên thi này (áp dụng cho cả
+        # lần tạo phiên mới lẫn reconnect — nếu chỉ ghi ở nhánh tạo mới thì
+        # phiên đã tồn tại sẽ không có vết để phục tra).
+        # Phase 1 dùng bản ghi này để xác minh heartbeat.
+        if is_verified_seb and identity.device_fingerprint:
+            from app.models.client_attestation import ClientAttestation
+            already = db.query(ClientAttestation).filter(
+                ClientAttestation.session_id == session.id,
+                ClientAttestation.device_fingerprint == identity.device_fingerprint,
+                ClientAttestation.verified.is_(True),
+            ).count() > 0
+            if not already:
+                db.add(ClientAttestation(
+                    session_id=session.id,
+                    client_type="seb",
+                    client_version=identity.client_version,
+                    device_fingerprint=identity.device_fingerprint,
+                    verified=True,
+                    verification_detail="OK_ON_JOIN",
+                    key_salt=secrets.token_hex(16),
+                ))
                 try:
                     db.commit()
-                except Exception as e:
+                except Exception:
                     db.rollback()
-                    logger.warning("Failed to update reconnect client info for session %d: %s", session.id, e)
+                    logger.warning("Không ghi được vết xác thực client cho session %d", session.id)
 
-        # Calculate time remaining
-        started_at = session.started_at
-        if started_at.tzinfo is None:
-            started_at = started_at.replace(tzinfo=timezone.utc)
-            
-        end_time_by_duration = started_at + timedelta(minutes=exam.duration_minutes)
-        schedule_end = schedule.end_time
-        if schedule_end.tzinfo is None:
-            schedule_end = schedule_end.replace(tzinfo=timezone.utc)
-            
-        effective_end = min(end_time_by_duration, schedule_end)
-        remaining_seconds = max(0, int((effective_end - now).total_seconds()))
+        # Ghi nhận việc thí sinh dùng web khi đề đang bắt buộc SEB (restricted mode).
+        # Đây là BẰNG CHỨNG phục tra, không phải cơ chế ngăn chặn (skills.md Quy tắc #5).
+        if restricted_mode:
+            AnticheatService.record_violation(db, session.id, ViolationLogCreate(
+                event_type="UNAUTHORIZED_CLIENT",
+                detail={
+                    "reason": "Exam requires Safe Exam Browser Client",
+                    "claimed_client_type": identity.client_type,
+                    "attested": False,
+                },
+                client_timestamp=datetime.now(timezone.utc),
+            ))
+
+        # Calculate time remaining (SERVER-authoritative)
+        started_at = to_utc_naive(session.started_at)
+        schedule_end = to_utc_naive(schedule.end_time)
+        effective_end = min(started_at + timedelta(minutes=exam.duration_minutes), schedule_end)
+        remaining_seconds = max(0, int((effective_end - to_utc_naive(now)).total_seconds()))
 
         # If time is already over, trigger auto submit gracefully
         if remaining_seconds <= 0:
@@ -172,9 +257,12 @@ class ExamSessionService:
             started_at=session.started_at,
             server_time=now,
             remaining_seconds=remaining_seconds,
-            max_violation_allowed=exam.max_violation_allowed,
+            max_violation_allowed=policy.max_tab_switch + policy.max_fullscreen_exit,
             questions=public_questions,
-            saved_answers=saved_dict
+            saved_answers=saved_dict,
+            security_policy=policy,
+            require_safe_browser=seb_required,
+            restricted_mode=restricted_mode,
         )
 
     @staticmethod
@@ -184,7 +272,9 @@ class ExamSessionService:
         data: SaveAnswerRequest,
         current_user: User
     ) -> dict:
-        session = db.query(ExamSession).filter(ExamSession.session_token == session_token).first()
+        session = db.query(ExamSession).options(
+            joinedload(ExamSession.schedule).joinedload(ExamSchedule.exam)
+        ).filter(ExamSession.session_token == session_token).first()
         if not session or session.status == "SUBMITTED":
             raise HTTPException(status_code=400, detail="Phiên thi không hợp lệ hoặc đã kết thúc")
 
@@ -196,12 +286,52 @@ class ExamSessionService:
                 detail="Bạn không có quyền thao tác trên phiên thi của thí sinh khác"
             )
 
+        if not session.schedule or not session.schedule.exam:
+            raise HTTPException(status_code=500, detail="Đề thi liên kết với ca thi không tồn tại")
+
+        # Server-authoritative time: chặn lưu đáp án SAU khi hết giờ.
+        # Trước đây chỉ kiểm tra thời gian lúc join, nên gọi API trực tiếp vẫn lưu được.
+        now = datetime.now(timezone.utc)
+        deadline = _get_deadline(session, session.schedule)
+        if to_utc_naive(now) > deadline:
+            logger.info(
+                "Từ chối lưu đáp án ngoài giờ: session=%d, quá hạn %s giây",
+                session.id, int((to_utc_naive(now) - deadline).total_seconds()),
+            )
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail="Đã hết thời gian làm bài, không thể lưu đáp án",
+            )
+
+        # Chỉ cho lưu câu hỏi thực sự thuộc đề thi này — trước đây thiếu bước này,
+        # thí sinh có thể gửi question_id bất kỳ để dựng bài giả.
+        exam_question = db.query(ExamQuestion).filter(
+            ExamQuestion.exam_id == session.schedule.exam_id,
+            ExamQuestion.question_id == data.question_id,
+        ).first()
+        if not exam_question:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="Câu hỏi không thuộc đề thi hiện tại",
+            )
+
+        # Các lựa chọn được chọn phải thuộc đúng câu hỏi đó.
+        if data.selected_option_ids:
+            option_count = db.query(QuestionOption).filter(
+                QuestionOption.question_id == data.question_id,
+                QuestionOption.id.in_(data.selected_option_ids),
+            ).count()
+            if option_count != len(set(data.selected_option_ids)):
+                raise HTTPException(
+                    status_code=status.HTTP_400_BAD_REQUEST,
+                    detail="Danh sách lựa chọn không hợp lệ với câu hỏi này",
+                )
+
         ans = db.query(StudentAnswer).filter(
             StudentAnswer.session_id == session.id,
             StudentAnswer.question_id == data.question_id
         ).first()
 
-        now = datetime.now(timezone.utc)
         try:
             if not ans:
                 ans = StudentAnswer(
@@ -239,6 +369,14 @@ class ExamSessionService:
 
         if not session:
             raise HTTPException(status_code=404, detail="Không tìm thấy phiên thi")
+
+        # Validate submit_type — client có thể gửi bất kỳ chuỗi nào.
+        if data.submit_type not in ALLOWED_SUBMIT_TYPES:
+            logger.warning(
+                "submit_type không hợp lệ '%s' cho session %d, chuyển thành MANUAL",
+                data.submit_type, session.id,
+            )
+            data.submit_type = "MANUAL"
 
         # Security check: Verify ownership unless system trigger or admin/teacher
         if not skip_auth_check and current_user:

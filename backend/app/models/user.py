@@ -14,6 +14,9 @@ class User(Base):
     role_id = Column(Integer, ForeignKey("roles.id", ondelete="RESTRICT"), nullable=False)
     student_code = Column(String(20), nullable=True, index=True)
     is_active = Column(Boolean, default=True, nullable=False)
+    # Salt dùng để dẫn xuất device_secret cho challenge-response (Phase 0).
+    # Chỉ lưu salt — khoá thật được dẫn xuất lúc chạy từ SECRET_KEY, không lưu rõ.
+    device_secret_salt = Column(String(64), nullable=True)
     created_at = Column(DateTime, default=lambda: datetime.now(timezone.utc), nullable=False)
     updated_at = Column(DateTime, default=lambda: datetime.now(timezone.utc), onupdate=lambda: datetime.now(timezone.utc), nullable=False)
 

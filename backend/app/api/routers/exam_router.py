@@ -1,5 +1,5 @@
 from typing import List, Optional
-from fastapi import APIRouter, Depends, status
+from fastapi import APIRouter, Depends, Request, status
 from sqlalchemy.orm import Session
 from app.core.database import get_db
 from app.dependencies.auth import require_role
@@ -9,6 +9,7 @@ from app.schemas.exam_schema import (
     ExamScheduleCreate, ExamScheduleUpdate, ExamScheduleResponse
 )
 from app.services.exam_service import ExamService
+from app.services.audit_service import AuditService
 
 router = APIRouter(prefix="/exams", tags=["Exams & Schedules"])
 
@@ -33,31 +34,40 @@ def get_exam(
 
 @router.post("", response_model=ExamDetailResponse, status_code=status.HTTP_201_CREATED)
 def create_exam(
+    request: Request,
     data: ExamCreate,
     db: Session = Depends(get_db),
     current_user: User = Depends(require_role(["ADMIN", "TEACHER"]))
 ):
     """Create a new exam."""
-    return ExamService.create_exam(db, data, current_user.id)
+    created = ExamService.create_exam(db, data, current_user.id)
+    AuditService.log(db, "EXAM_CREATE", current_user.id, request.client.host if request.client else None)
+    return created
 
 @router.put("/{exam_id}", response_model=ExamDetailResponse)
 def update_exam(
+    request: Request,
     exam_id: int,
     data: ExamUpdate,
     db: Session = Depends(get_db),
     current_user: User = Depends(require_role(["ADMIN", "TEACHER"]))
 ):
     """Update exam parameters and question list."""
-    return ExamService.update_exam(db, exam_id, data)
+    updated = ExamService.update_exam(db, exam_id, data)
+    AuditService.log(db, "EXAM_UPDATE", current_user.id, request.client.host if request.client else None)
+    return updated
 
 @router.delete("/{exam_id}")
 def delete_exam(
+    request: Request,
     exam_id: int,
     db: Session = Depends(get_db),
     current_user: User = Depends(require_role(["ADMIN", "TEACHER"]))
 ):
     """Delete an exam."""
-    return ExamService.delete_exam(db, exam_id)
+    result = ExamService.delete_exam(db, exam_id)
+    AuditService.log(db, "EXAM_DELETE", current_user.id, request.client.host if request.client else None)
+    return result
 
 # --- Exam Schedules ---
 @router.get("/schedules/list", response_model=List[ExamScheduleResponse])
@@ -71,19 +81,25 @@ def list_schedules(
 
 @router.post("/schedules", response_model=ExamScheduleResponse, status_code=status.HTTP_201_CREATED)
 def create_schedule(
+    request: Request,
     data: ExamScheduleCreate,
     db: Session = Depends(get_db),
     current_user: User = Depends(require_role(["ADMIN", "TEACHER"]))
 ):
     """Create a new exam room schedule."""
-    return ExamService.create_schedule(db, data, current_user.id)
+    created = ExamService.create_schedule(db, data, current_user.id)
+    AuditService.log(db, "SCHEDULE_CREATE", current_user.id, request.client.host if request.client else None)
+    return created
 
 @router.put("/schedules/{schedule_id}", response_model=ExamScheduleResponse)
 def update_schedule(
+    request: Request,
     schedule_id: int,
     data: ExamScheduleUpdate,
     db: Session = Depends(get_db),
     current_user: User = Depends(require_role(["ADMIN", "TEACHER"]))
 ):
     """Update an exam schedule."""
-    return ExamService.update_schedule(db, schedule_id, data)
+    updated = ExamService.update_schedule(db, schedule_id, data)
+    AuditService.log(db, "SCHEDULE_UPDATE", current_user.id, request.client.host if request.client else None)
+    return updated

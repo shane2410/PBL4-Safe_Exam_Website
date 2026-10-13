@@ -13,10 +13,15 @@ class Exam(Base):
     total_score = Column(Numeric(5, 2), nullable=False, default=10.00)
     is_shuffled = Column(Boolean, default=True, nullable=False)
     max_violation_allowed = Column(Integer, default=5, nullable=False)
+    # Cờ cấp đề: đề này BẮT BUỘC phải thi qua Safe Exam Browser Client.
+    # Hiệu lực thật sự = cờ này AND system_settings.require_safe_browser_global.
+    require_safe_browser = Column(Boolean, default=False, nullable=False)
     created_by = Column(Integer, ForeignKey("users.id", ondelete="SET NULL"), nullable=True)
     created_at = Column(DateTime, default=lambda: datetime.now(timezone.utc), nullable=False)
+    updated_at = Column(DateTime, default=lambda: datetime.now(timezone.utc), onupdate=lambda: datetime.now(timezone.utc), nullable=False)
 
     subject = relationship("Subject", back_populates="exams")
     creator = relationship("User", back_populates="created_exams")
     exam_questions = relationship("ExamQuestion", back_populates="exam", cascade="all, delete-orphan", order_by="ExamQuestion.order_index")
     schedules = relationship("ExamSchedule", back_populates="exam", cascade="all, delete-orphan")
+    security_config = relationship("ExamSecurityConfigRow", back_populates="exam", cascade="all, delete-orphan", uselist=False)

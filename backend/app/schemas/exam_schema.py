@@ -3,6 +3,7 @@ from typing import List, Optional
 from pydantic import BaseModel, Field, ConfigDict
 from app.schemas.question_schema import QuestionAdmin, SubjectResponse
 from app.schemas.auth_schema import UserResponse
+from app.schemas.settings_schema import ExamSecurityConfig
 
 class ExamQuestionItem(BaseModel):
     question_id: int
@@ -26,6 +27,8 @@ class ExamCreate(BaseModel):
     total_score: float = Field(default=10.0, ge=1.0)
     is_shuffled: bool = True
     max_violation_allowed: int = Field(default=5, ge=1, le=50)
+    require_safe_browser: bool = False
+    security_config: Optional[ExamSecurityConfig] = None
     questions: List[ExamQuestionItem] = []
 
 class ExamUpdate(BaseModel):
@@ -34,6 +37,8 @@ class ExamUpdate(BaseModel):
     total_score: Optional[float] = None
     is_shuffled: Optional[bool] = None
     max_violation_allowed: Optional[int] = None
+    require_safe_browser: Optional[bool] = None
+    security_config: Optional[ExamSecurityConfig] = None
     questions: Optional[List[ExamQuestionItem]] = None
 
 class ExamResponse(BaseModel):
@@ -47,12 +52,14 @@ class ExamResponse(BaseModel):
     total_score: float
     is_shuffled: bool
     max_violation_allowed: int
+    require_safe_browser: bool = False
     created_by: Optional[int] = None
     created_at: datetime
     question_count: Optional[int] = 0
 
 class ExamDetailResponse(ExamResponse):
     exam_questions: List[ExamQuestionResponse] = []
+    security_config: Optional[ExamSecurityConfig] = None
 
 # --- Exam Schedule Schemas ---
 class ExamScheduleCreate(BaseModel):

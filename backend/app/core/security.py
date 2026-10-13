@@ -55,3 +55,14 @@ def decode_access_token(token: str) -> Optional[dict]:
         return payload
     except jwt.PyJWTError:
         return None
+
+def to_utc_naive(dt: datetime) -> datetime:
+    """Chuẩn hoá datetime về UTC-naive để nhất quán với cách lưu trong DB.
+
+    Mọi cột DateTime trong model đều lưu UTC-naive (xem `datetime.now(timezone.utc)`
+    trong từng model), nên datetime có tz-aware từ client phải được chuyển về
+    UTC-naive trước khi so sánh/ghi, nếu không sẽ lệch múi giờ.
+    """
+    if dt.tzinfo is None:
+        return dt
+    return dt.astimezone(timezone.utc).replace(tzinfo=None)

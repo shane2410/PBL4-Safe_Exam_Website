@@ -25,6 +25,10 @@ class Settings(BaseSettings):
     HEARTBEAT_INTERVAL_SECONDS: int = 10
     HEARTBEAT_TIMEOUT_SECONDS: int = 30
 
+    # Phase 0 — Safe Exam Browser Client attestation
+    # Thời gian sống của nonce challenge (giây). Nonce dùng 1 lần rồi bị xoá.
+    CLIENT_NONCE_TTL_SECONDS: int = 30
+
     model_config = SettingsConfigDict(
         env_file=os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(__file__))), ".env"),
         env_file_encoding="utf-8",

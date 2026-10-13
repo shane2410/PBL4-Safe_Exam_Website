@@ -259,13 +259,46 @@ def seed():
                 exam_id=exam.id,
                 room_code=room_code,
                 start_time=now - timedelta(minutes=15),
-                end_time=now + timedelta(hours=3),
+                end_time=now + timedelta(hours=8),
                 supervised_by=users_map["teacher1"].id,
                 status="ONGOING"
             )
             db.add(schedule)
             db.flush()
+        else:
+            # Ca đã tồn tại nhưng đã hết hạn (thường gặp khi chạy lại seed vài ngày
+            # sau) -> lùi khung giờ về quanh thời điểm hiện tại để demo được ngay.
+            end_time = schedule.end_time
+            if end_time.tzinfo is None:
+                end_time = end_time.replace(tzinfo=timezone.utc)
+            if end_time <= now:
+                schedule.start_time = now - timedelta(minutes=15)
+                schedule.end_time = now + timedelta(hours=8)
+                schedule.status = "ONGOING"
+                db.flush()
+                print(f"↻ Đã lùi khung giờ ca '{room_code}' về hiện tại (trước đó đã hết hạn)")
         print(f"✓ Seeded Exam Schedule with Room Code: {room_code}")
+
+        # 7. Seed System Settings (Phase 0 — cấu hình khoá an toàn toàn cục)
+        from app.models.system_setting import SystemSetting
+        from app.services.settings_service import (
+            SETTING_KEY_DEFAULT_SECURITY,
+            SETTING_KEY_REQUIRE_SAFE_BROWSER,
+            SETTING_KEY_SEB_CLIENT,
+            FALLBACK_VALUES,
+        )
+
+        settings_seed = {
+            SETTING_KEY_REQUIRE_SAFE_BROWSER: False,
+            SETTING_KEY_SEB_CLIENT: FALLBACK_VALUES[SETTING_KEY_SEB_CLIENT],
+            SETTING_KEY_DEFAULT_SECURITY: FALLBACK_VALUES[SETTING_KEY_DEFAULT_SECURITY],
+        }
+        for key, value in settings_seed.items():
+            exists = db.query(SystemSetting).filter_by(setting_key=key).first()
+            if not exists:
+                db.add(SystemSetting(setting_key=key, setting_value=value, updated_by=users_map["admin"].id))
+                db.flush()
+        print("✓ Seeded System Settings (require_safe_browser_global = False)")
 
         db.commit()
         print("🎉 Database seeding completed successfully!")
