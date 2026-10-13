@@ -176,7 +176,7 @@ def register_exam_socket_handlers():
                 ).filter(ExamSession.id == session_id).first()
                 if session:
                     # Broadcast violation alert to teacher monitor room
-                    monitor_room = f"monitor_{room_code}"
+                    monitor_room = f"monitor_{room_code.upper()}"
                     await sio.emit("violation_alert", {
                         "session_id": session_id,
                         "student_name": sock_info["student_name"],
@@ -221,7 +221,7 @@ def register_exam_socket_handlers():
             session_id = sock_info["session_id"]
             room_code = sock_info["room_code"]
 
-            monitor_room = f"monitor_{room_code}"
+            monitor_room = f"monitor_{room_code.upper()}"
             await sio.emit("student_status_change", {
                 "session_id": session_id,
                 "student_id": sock_info["student_id"],

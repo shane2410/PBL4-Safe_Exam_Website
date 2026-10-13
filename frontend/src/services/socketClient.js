@@ -18,6 +18,19 @@ export function getSocket() {
     withCredentials: true,
   })
 
+  // PHẢI gọi connect() thủ công vì autoConnect đang tắt.
+  //
+  // Trước đây không nơi nào gọi connect(), nên socket KHÔNG BAO GIỜ kết nối.
+  // Hệ quả âm thầm rất đáng sợ:
+  //   - useSecurityPolicy.logViolation() thấy socket.connected === false nên
+  //     bỏ qua im lặng -> vi phạm của học sinh không bao giờ tới server
+  //     -> bảng violation_logs rỗng -> màn hình giám sát không có gì cả,
+  //     trong khi học sinh VẪN thấy cửa sổ cảnh báo (vì nó là state cục bộ).
+  //   - Giáo viên vào phòng giám sát cũng không vào được phòng
+  //     `monitor_<ROOM>` nên không nhận violation_alert.
+  // Triệu chứng: "báo bên học sinh mà không báo bên giám sát".
+  socket.connect()
+
   return socket
 }
 
