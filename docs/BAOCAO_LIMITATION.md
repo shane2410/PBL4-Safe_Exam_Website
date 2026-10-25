@@ -99,25 +99,35 @@ Nó **không** làm là:
 
 ---
 
-## 4. Hạn chế của cơ chế chống giả mạo client (challenge-response HMAC)
+## 4. Hạn chế của cơ chế chống giả mạo client
 
-Cơ chế dùng nonce 1-lần + HMAC-SHA256 với `device_secret` dẫn xuất từ salt + `SECRET_KEY`.
+Cơ chế dùng **nonce một lần + chữ ký Ed25519 bằng cặp khoá sinh trên máy**: private
+key nằm trong kho hệ thống (DPAPI / Keychain / Secret Service), public key đăng ký lên
+server. Server xác minh bằng public key — tức là **server không thể tự ký thay client**.
 
-**Nó chống được:** giả header bằng `curl`/Postman, chơi lại request đã bắt.
+**Nó chống được:** giả header bằng `curl`/Postman, chơi lại request đã bắt, sao chép
+khoá của một máy sang máy khác (máy khác chưa đăng ký public key đó).
 
-**Nó KHÔNG chống được:** kẻ tấn công có mã nguồn client vẫn có thể **chạy client thật một
-lần** để lấy `device_secret`, sau đó dùng khoá đó giả mạo.
+**Nó KHÔNG chống được:** kẻ tấn công chiếm được máy thí sinh ở mức hệ điều hành vẫn
+đọc được private key trong kho hệ thống. Đây là giới hạn bản chất của mọi cơ chế chống
+giả mạo chạy trên máy người dùng — không thể vượt bằng thuật toán.
 
-Đây là giới hạn bản chất của mọi cơ chế chống giả mạo chạy trên máy người dùng — không
-thể vượt qua bằng thuật toán. Biện pháp mạnh hơn là **code signing** (ký số binary), được
-xếp ở Phase 2 và mới chỉ chặn được ở mức rào chắn.
+So với mô hình khoá đối xứng đã cân nhắc trước đó, thiết kế này nâng rõ rệt ngưỡng:
+khoá riêng không bao giờ rời thiết bị, và lộ khoá bí mật phía server **không** đủ để
+giả danh SEB Client. Biện pháp bổ sung vẫn là **code signing** (ký số binary) ở Phase 2,
+là biện pháp *đáng tiền nhất* vì nó chặn được việc đóng gói lại bản đã patch.
 
 Ngoài ra:
 
-- `device_secret` được dẫn xuất từ `SECRET_KEY` trong `.env`. **Nếu bị lộ `SECRET_KEY`,
-  toàn bộ cơ chế xác thực mất hiệu lực.** Cần đổi khoá bí mật trước khi triển khai thật.
 - Store nonce hiện là **in-memory**, chỉ đúng khi chạy **một tiến trình uvicorn**. Nếu chạy
   `--workers > 1`, client xin nonce ở worker A rồi xác thực ở worker B sẽ luôn thất bại.
+- Không phải máy nào cũng có kho hệ thống (đặc biệt Linux/Wayland). Khi thiếu, client
+  báo `KEYSTORE_UNAVAILABLE` và có thể chạy chế độ **giảm bảo mật** nếu GV đồng ý; hệ
+  thống log `DEVICE_KEY_WEAK` để GV thấy trên dashboard. Private key **không bao giờ**
+  được lưu dạng rõ.
+- Client có thể tạm dừng rồi chạy tiếp: đăng nhập lại là được, không mất dữ liệu thi.
+  Đây là lý do lưu trữ cục bộ được chấp nhận, nhưng cũng là điểm yếu: dữ liệu trên đĩa
+  không được mã hoá phần sinh trắc.
 
 ---
 

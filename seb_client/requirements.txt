@@ -1,0 +1,26 @@
+# SEB Client — đã cài và kiểm chứng trên Python 3.14 / Arch Linux.
+# Số phiên bản ghim cứng: SEB Client là sản phẩm phát hành, không được
+# "nâng cấp linh hoạt" giữa kỳ thi.
+
+PySide6==6.12.0
+PySide6-WebEngine==6.12.0.140
+
+# qasync là BẮT BUỘC, không phải tuỳ chọn: nó chạy Qt event loop bên trong
+# asyncio. Thiếu nó thì heartbeat async sẽ treo cửa sổ.
+qasync==0.28.0
+
+# Bản [asyncio_client] kéo theo python-engineio[asyncio_client].
+# Bản sync sẽ chặn event loop Qt — đúng nguyên nhân qasync sinh ra.
+python-socketio[asyncio_client]==5.17.0
+python-engineio==4.14.0
+
+httpx==0.28.1
+cryptography==50.0.2
+python-dotenv==1.2.3
+
+# --- Chỉ Windows ---
+pywin32==312 ; sys_platform == "win32"
+
+# --- Chỉ macOS ---
+pyobjc-framework-Cocoa==12.2.2 ; sys_platform == "darwin"
+pyobjc-framework-Quartz==12.2.2 ; sys_platform == "darwin"

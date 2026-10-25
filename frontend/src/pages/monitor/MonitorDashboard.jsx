@@ -37,6 +37,9 @@ export default function MonitorDashboard() {
   const [stats, setStats] = useState(null)
   const [error, setError] = useState('')
   const [forcing, setForcing] = useState(null)
+  // Ngưỡng vi phạm do server gửi kèm khi vào phòng giám sát. Dùng để hiện
+  // "3 / 5" thay vì con số trần, và tô đỏ khi đã vượt.
+  const [limits, setLimits] = useState(null)
 
   const socketRef = useRef(null)
 
@@ -84,6 +87,7 @@ export default function MonitorDashboard() {
     const onConnect = () => {
       setConnected(true)
       socket.emit('join_monitor_room', { room_code: roomCode }, (res) => {
+        if (res?.limits) setLimits(res.limits)
         if (res?.active_students) {
           setStudents(
             res.active_students.map((s) => ({
@@ -335,7 +339,21 @@ export default function MonitorDashboard() {
                             <div className="w-20 h-2 rounded-full bg-slate-200 overflow-hidden">
                               <div
                                 className={`h-full ${riskBarColor(s.risk_score ?? 0)}`}
-                                style={{ width: `${Math.min(100, Math.round((s.risk_score ?? 0) / 3))}%` }}
+                                style={{
+                                  // Trước đây chia cho 3 -> risk 3 là 100%, còn mọi
+                                  // phiên thực tế (85+) đều ghim 100%, thanh không
+                                  // còn thông tin gì. Lấy mốc là risk tương đương
+                                  // chạm ngưỡng: max_violations × trọng số nặng nhất
+                                  // trong hai loại đang đếm (FULLSCREEN_EXIT = 15).
+                                  width: `${Math.min(
+                                    100,
+                                    Math.round(
+                                      ((s.risk_score ?? 0) /
+                                        Math.max(1, (limits?.max_violations ?? 8) * 15)) *
+                                        100,
+                                    ),
+                                  )}%`,
+                                }}
                               />
                             </div>
                             <span className="text-xs font-medium text-slate-600 tabular-nums">
@@ -343,11 +361,39 @@ export default function MonitorDashboard() {
                             </span>
                           </div>
                         </td>
-                        <td className="px-6 py-3 text-center text-slate-600">
-                          {s.tab_switch_count ?? 0}
+                        <td className="px-6 py-3 text-center">
+                          <span
+                            className={`font-mono text-sm tabular-nums ${
+                              limits?.max_tab_switch != null &&
+                              (s.tab_switch_count ?? 0) > limits.max_tab_switch
+                                ? 'font-semibold text-error'
+                                : 'text-slate-600'
+                            }`}
+                          >
+                            {s.tab_switch_count ?? 0}
+                          </span>
+                          {limits?.max_tab_switch != null && (
+                            <span className="text-xs text-slate-400 font-mono">
+                              /{limits.max_tab_switch}
+                            </span>
+                          )}
                         </td>
-                        <td className="px-6 py-3 text-center text-slate-600">
-                          {s.fullscreen_exit_count ?? 0}
+                        <td className="px-6 py-3 text-center">
+                          <span
+                            className={`font-mono text-sm tabular-nums ${
+                              limits?.max_fullscreen_exit != null &&
+                              (s.fullscreen_exit_count ?? 0) > limits.max_fullscreen_exit
+                                ? 'font-semibold text-error'
+                                : 'text-slate-600'
+                            }`}
+                          >
+                            {s.fullscreen_exit_count ?? 0}
+                          </span>
+                          {limits?.max_fullscreen_exit != null && (
+                            <span className="text-xs text-slate-400 font-mono">
+                              /{limits.max_fullscreen_exit}
+                            </span>
+                          )}
                         </td>
                         <td className="px-6 py-3 text-slate-500 text-xs">
                           {s.submitted_at ? formatDateTime(s.submitted_at) : '—'}

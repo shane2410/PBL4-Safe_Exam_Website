@@ -36,11 +36,16 @@ Quyết định cuối cùng = (exam.require_safe_browser == true)
     + ghi log UNAUTHORIZED_CLIENT làm bằng chứng phục tra
     + frontend hiển thị PolicyGate hướng dẫn dùng SEB Client (xem mục 3.4)
     + nếu GV tắt allow_web_fallback -> thí sinh phải chuyển sang SEB Client
+      (⚠ CHƯA THI HÀNH Ở TẦNG SERVER: `allow_web_fallback` hiện chỉ được frontend
+       đọc — xem `docs/SEB_GATE_DESIGN.md` mục 2.1)
 
 Quyết định = false
   → Cả Web lẫn SEB Client đều thi được, mức ràng buộc khác nhau (xem mục 3.5)
 ```
 
+> **Đặc tả đầy đủ:** xem [`docs/SEB_GATE_DESIGN.md`](SEB_GATE_DESIGN.md) — máy trạng thái
+> phiên, hợp đồng API, vòng đời attestation token, mã lỗi và quy trình kiểm thử T1–T10.
+>
 > **Ghi chú quan trọng (Quy tắc #5):** đây là cơ chế **RĂN ĐE + GHI NHẬN BẰNG CHỨNG**, không phải ngăn chặn tuyệt đối. Cờ này không làm gì nếu thí sinh không chịu dùng SEB Client; nó chỉ đảm bảo rằng ai dùng web đều **để lại dấu vết phục tra**. Giá trị thật của nó nằm ở chỗ hệ thống *phân biệt được* phiên thi hợp lệ với phiên thi không qua kiểm chứng.
 
 Hệ quả: GV có thể **tắt** yêu cầu bắt buộc cho từng đề ngay cả khi toàn trường đang bật — tránh tình huống một đề bất thường chặn cả lớp.
@@ -118,6 +123,30 @@ CREATE TABLE exam_security_configs (
 | `warn_countdown_seconds` | int | 10 | Mức 2: đếm ngược yêu cầu quay lại |
 | `disable_print` | bool | true | Chặn Ctrl+P |
 
+> ⚠ **Lỗi phát hiện khi thiết kế SEB (đã kiểm chứng trong code, chưa sửa):** ngưỡng
+> tự nộp được đo bằng `total_violations` — **đếm mọi row `ViolationLog`** — chứ không
+> phải đếm riêng `TAB_SWITCH` và `FULLSCREEN_EXIT`. Hai hậu quả:
+>
+> 1. **Sự kiện kiểm toán ăn nhầm ngân sách.** Bất kỳ `event_type` nào ghi vào
+>    `ViolationLog` đều bị cộng, kể cả loại có `risk_score = 0`.
+> 2. **`CONNECTION_LOST` — tức mất mạng — cũng bị tính là vi phạm.**
+>    `heartbeat_monitor.py` ghi log loại này (risk 5). Với `max_tab_switch=1,
+>    max_fullscreen_exit=1` thì `max_allowed = 2`; thí sinh chỉ cần rớt mạng **một
+>    lần** là đã mất nửa ngân sách, và mất mạng là lỗi của hạ tầng chứ không phải
+>    của thí sinh.
+>
+> **Cách sửa:** tách khái niệm "sự kiện kiểm toán" khỏi "vi phạm". Thêm
+> `AUDIT_ONLY_EVENT_TYPES` (gồm `EXIT_UNLOCK_*`) và lọc ở tầng DB:
+> ```
+> total_violations = db.query(ViolationLog)
+>     .filter(ViolationLog.session_id == session_id,
+>             ~ViolationLog.event_type.in_(AUDIT_ONLY_EVENT_TYPES))
+>     .count()
+> ```
+> `CONNECTION_LOST` nên tính vào một bộ đếm riêng (`connection_lost_count`) và chỉ
+> cảnh báo GV, **không** tiêu tốn `max_violation_allowed`. Chi tiết và test hồi quy
+> ở `docs/SEB_CLIENT_SPEC.md` mục 3.7.
+
 **Ghi đè `exams.max_violation_allowed`:** field cũ này vẫn giữ nguyên để không phá dữ liệu, nhưng `ExamSecurityConfig.max_tab_switch + max_fullscreen_exit` là nguồn chuẩn. Trong `anticheat_service`, ngưỡng lấy theo thứ tự: `exam_security_configs` → fallback `exams.max_violation_allowed`.
 
 ### 0.3 Thay đổi Backend
@@ -156,6 +185,11 @@ CREATE TABLE exam_security_configs (
         device_secret = HMAC-SHA256(key = SECRET_KEY, msg = "device_secret|<user_id>|<salt>")
         message       = "nonce|client_version|device_fingerprint"
         signature     = base64( HMAC-SHA256(key = device_secret, msg = message) )
+
+   ⚠ **Đây là mô hình ĐANG CHẠY ở Phase 0 (khoá đối xứng).** Phase 1 sẽ thay toàn bộ
+   khối này bằng chữ ký Ed25519 bằng cặp khoá sinh trên máy — xem mục **1.5.2**.
+   Lý do: khoá đối xứng buộc client phải *nhận* khoá từ server, nên nó nằm trong RAM
+   client; khoá bất đối xứng thì không bao giờ rời thiết bị.
 
 4. Client POST /api/auth/client-attest
       Body: { nonce, client_version, device_fingerprint, signature }
@@ -403,10 +437,6 @@ class BaseOSAdapter(ABC):
     def unlock_clipboard(self) -> None: ...
 
     @abstractmethod
-    def detect_vm_or_sandbox(self) -> tuple[bool, list[str]]:
-        """Trả (có phải VM không, danh sách dấu hiệu)."""
-
-    @abstractmethod
     def block_screen_capture(self) -> bool:
         """Windows 10 1803+: SetDisplayAffinity(DISPLAY_AFFINITY_READONLY).
         macOS: không có API tương đương cho app thường.
@@ -434,7 +464,6 @@ class BaseOSAdapter(ABC):
 | Khoá clipboard hệ thống | ✅ `OpenClipboard` chain | ✅ `NSPasteboard` | ✅ `QLocalClipboard` | ⚠️ |
 | Chặn chụp màn hình | ✅ `DISPLAY_AFFINITY_READONLY` | ⚠️ `CGWindowListCreateImage` cần entitlement | ⚠️ | ✅ portal |
 | Chặn task manager | ⚠️ phát hiện được | ✅ | ✅ | ✅ |
-| Phát hiện VM/sandbox | ✅ | ✅ | ✅ | ✅ |
 | Phát hiện debugger | ✅ `IsDebuggerPresent` | ✅ `sysctl P_TRACED` | ✅ `/proc/self/status` | ✅ |
 
 > **Cột "⚠️/❌" là những ô trống thật, phải nêu trong báo cáo theo Quy tắc #5.** Client **không được** im lặng bỏ qua — phải gửi lên server `violation` với `detail.unsupported = ["wayland_monitor_switch"]` để GV biết máy đó không được hỗ trợ đầy đủ.
@@ -462,7 +491,16 @@ def detect_monitor_switch(self) -> str | None:
     return title
 ```
 
-Vòng lặp gọi hàm này mỗi **300 ms**. Phát hiện tên cửa sổ lạ → `TAB_SWITCH` hoặc type mới `FOREIGN_WINDOW_DETECTED` (xem mục 4.1).
+Vòng lặp gọi hàm này mỗi **100 ms**. Phát hiện tên cửa sổ lạ → `TAB_SWITCH` hoặc type mới `FOREIGN_WINDOW_DETECTED` (xem mục 4.1).
+
+> **Vì sao 100 ms chứ không phải 300 ms:** một chu kỳ gian lận thực tế là
+> `Alt+Tab → chép nội dung → Alt+Tab về`, mất khoảng **400–600 ms**. Vòng lặp 300 ms
+> nằm *bên trong* thời gian đó, nên rất dễ lọt lưới. 100 ms đảm bảo có ít nhất vài
+> lần lấy mẫu trong lúc cửa sổ khác chiếm foreground.
+>
+> Chi phí: mỗi vòng gọi `GetForegroundWindow` + `GetWindowTextW` qua ctypes là rất
+> rẻ. Không nên xuống dưới 50 ms — bắt đầu lãng phí CPU mà không bắt thêm được
+> ca nào (mắt người không quay lại cửa sổ nhanh hơn 50 ms).
 
 > **Khác biệt then chốt so với web:** web chỉ biết "tab đã ẩn", biết *sau khi* người dùng đã Alt+Tab. Client biết **cửa sổ nào** đang chiếm foreground. Đây là lý do cấp B đáng giá.
 
@@ -471,22 +509,260 @@ Vòng lặp gọi hàm này mỗi **300 ms**. Phát hiện tên cửa sổ lạ 
 ```
 Mở app
   → LoginWindow: đăng nhập (tài khoản thí sinh) → nhập mã phòng
-  → GET /client-nonce  →  HMAC  →  POST /client-attest
+  → POST /auth/client-nonce  →  HMAC  →  POST /auth/client-attest
   → Server trả { attested: true, attestation_key, policy, exam_url }
-  → ExamWindow: QWebEngineView nạp exam_url
+  → ExamWindow: QWebEngineView nạp exam_url (CHÍNH LÀ React app của Lớp A)
   → Bật các guard theo `policy` (từng guard tự bật/tắt theo cờ trong policy)
-  → Vòng lặp: heartbeat 10s (có ký HMAC) + monitor OS 300ms
+  → Vòng lặp: heartbeat 10s (có ký HMAC) + monitor OS 100ms
   → Vi phạm → emit lên server → policy quyết định cảnh báo / đếm ngược / khoá
   → Hết giờ hoặc vượt ngưỡng → server trả lệnh khoá → client khoá & đóng
 ```
 
 **Điểm quan trọng:** client **không tự quyết định** nộp bài. Nó chỉ nhận lệnh. Đây là Quy tắc #4 áp dụng cho cả 2 lớp.
 
-### 1.5 Tiêu chí hoàn thành Phase 1
+> **Kiến trúc `ExamWindow` — cần nói rõ vì dễ hiểu sai.**
+>
+> SEB Client **không** có giao diện thi riêng. `QWebEngineView` nạp đúng trang
+> React của Lớp A, nên các hook web (`useKeyboardBlock`, `useVisibilityMonitor`,
+> `useFullscreenLock`…) **vẫn chạy bên trong "client an toàn"**.
+>
+> - **Điều này tốt:** phòng thủ nhiều lớp. Đâm thủng lớp client thì vẫn còn lớp web.
+> - **Nhưng không phải bất khả xâm phạm:** kẻ tấn công chỉ cần *không nạp trang đó*
+>   là mất cả hai lớp cùng lúc. Đây chính là hạn chế đã ghi ở hàng **C12** của bảng
+>   mô hình đe doạ.
+>
+> Hệ quả cho kế hoạch: đừng coi việc "viết lại giao diện thi bằng Qt" là một hạng
+> mục của Phase 1 — nó không có trong phạm vi, và cũng không tăng thêm khả năng chống
+> can thiệp trên thực tế.
 
-- [ ] Chạy được trên cả 3 OS từ cùng codebase, chỉ khác lệnh build.
+### 1.5 Khung khởi động — những thứ phải chốt trước dòng code đầu tiên
+
+#### 1.5.1 `seb_client/requirements.txt` (đã tra phiên bản thật từ PyPI)
+
+```
+# Lõi Qt
+PySide6==6.12.0
+PySide6-WebEngine==6.12.0.140
+qasync==0.28.0                      # chạy asyncio của socketio ngay trên Qt event loop
+
+# Socket.IO — KHÔNG dùng bản sync
+python-socketio[asyncio_client]==5.17.0
+python-engineio[asyncio_client]==4.14.0
+
+# Mã hoá
+cryptography==50.0.2                # cặp khoá Ed25519 cho thiết bị (mục 1.5.2)
+
+# Adapter Windows (đánh dấu theo hệ điều hành)
+pywin32==312 ; sys_platform == "win32"
+
+# Adapter macOS
+pyobjc-framework-Cocoa==12.2.2 ; sys_platform == "darwin"
+pyobjc-framework-Quartz==12.2.2 ; sys_platform == "darwin"
+
+# HTTP
+httpx==0.28.1
+```
+
+> **Quyết định kiến trúc quan trọng: dùng socketio ASYNC + `qasync`.**
+> Bản sync sẽ chặn Qt event loop, làm cửa sổ đứng hình mỗi khi heartbeat bắn.
+> Bắt buộc có `qasync` từ đầu, không phải sửa sau.
+
+#### 1.5.2 Khoá xác thực — ĐÃ CHỐT: cặp khoá Ed25519 sinh trên máy
+
+> **Trạng thái: đã quyết định theo hướng (b).** Không còn là câu hỏi mở.
+
+Mô hình cũ dùng `device_secret = HMAC(SECRET_KEY, salt)` — khoá đối xứng phía server
+sinh ra, client phải **nhận** nó, nên nó nằm trong RAM client và hook hàm ký là lấy
+được. Chuyển sang khoá bất đối xứng sinh ngay trên máy thì vấn đề biến mất: khoá
+riêng **không bao giờ rời thiết bị**, và server **không cần** — cũng **không thể** —
+tự sinh ra nó.
+
+```
+LẦN ĐẦU DÙNG MÁY (đăng ký thiết bị)
+  1. Client sinh cặp Ed25519 (cryptography)
+  2. private key -> kho hệ thống:
+        Windows : DPAPI (CryptProtectData)
+        macOS   : Keychain (SecKey / keyring)
+        Linux   : Secret Service (libsecret) — X11 hoạt động tốt,
+                   Wayland có thể không có -> xem 1.5.2.1
+  3. Client gửi PUBLIC key + nhãn thiết bị lên server
+  4. Server lưu vào bảng `client_devices`, sinh `device_id`
+  5. device_id = sha256(public_key)[:16]  <- định danh thiết bị ổn định,
+                                             KHÔNG dùng MAC/hostname (đổi được)
+
+MỖI LẦN VÀO PHÒNG (attest)
+  6. Client xin nonce:  POST /auth/client-nonce
+  7. Client ký bằng private key:
+         Ed25519( nonce | client_version | device_fingerprint | device_id )
+  8. Server xác minh bằng public key đã đăng ký + kiểm tra nonce chưa dùng
+  9. Server trả attestation_token (TTL 5 phút), gắn `device_id` vào phiên thi
+```
+
+**Điểm quan trọng:** bỏ hẳn `attestation_key` đối xứng. Mọi thứ client ký gửi lên —
+kể cả heartbeat — đều dùng **private key của thiết bị**, và server xác minh bằng
+public key. Hệ quả trực tiếp:
+
+| Việc | Mô hình cũ (a) | Mô hình mới (b) |
+|---|---|---|
+| Lộ `SECRET_KEY` | Giả được attestation, mất trắng | **Chỉ** mất JWT. Không giả được attestation vì thiếu private key trên thiết bị |
+| Hook hàm ký trong client | Đọc được khoá dùng chung | Đọc được private key — nhưng chỉ **trên máy đó** |
+| Sao chép khoá sang máy khác | Không kiểm soát | Server từ chối nếu khoá lạ chưa được đăng ký |
+| Server có tự dựng khoá giả được không | Không | **Không thể** — đây là điểm mạnh nhất |
+
+##### 1.5.2.1 Xử lý khi không có kho hệ thống
+
+Không phải máy nào cũng có kho hệ thống (đặc biệt Linux/Wayland, hoặc máy thi chạy
+trong container). Thứ tự ưu tiên, **không được âm thầm hạ cấp bảo mật**:
+
+1. Có kho hệ thống → dùng (bình thường).
+2. Không có → client **báo rõ** `KEYSTORE_UNAVAILABLE`, nêu hệ điều hành và hậu quả.
+3. GV có thể cho phép chạy chế độ **giảm bảo mật**: private key lưu ở dạng mã hoá bằng
+   khoá dẫn xuất từ thông tin máy — ghi rõ đây là lựa chọn *yếu hơn*, và log
+   `DEVICE_KEY_WEAK` để GV thấy trên dashboard.
+4. **Không bao giờ** lưu private key dạng rõ không mã hoá.
+
+##### 1.5.2.2 Thay đổi phía backend bắt buộc
+
+| # | Việc | Nơi sửa |
+|---|---|---|
+| 1 | Bảng `client_devices` (user_id, device_id, public_key, label, created_at, last_seen_at, revoked_at) | migration |
+| 2 | `POST /auth/client-devices` — đăng ký hoặc lấy lại public key đã biết | `auth_router.py` |
+| 3 | Xác minh Ed25519 trong `verify_attestation` | `attestation_service.py` |
+| 4 | `exam_sessions` thêm `device_id`, `attestation_token_id` | migration |
+| 5 | Heartbeat xác minh chữ ký Ed25519 (hiện **chưa** xác minh gì) | `exam_namespace.py` |
+| 6 | `X-Device-Fingerprint` giờ là hash public key, bỏ ý tưởng dùng MAC/hostname | `client_identity.py` |
+
+> **Lưu ý mở rộng cho C13 (mục 2.2):** sau khi chuyển sang mô hình này, lộ
+> `SECRET_KEY` **không còn** đủ để giả attestation. C13 nên được hạ từ **Cao** xuống
+> **Trung bình** — vẫn nghiêm trọng (mất JWT) nhưng không còn là điều kiện tiên quyết
+> của cơ chế chống giả mạo client nữa.
+
+#### 1.5.3 Client lưu token thế nào
+
+| Token | Nơi lưu | Ghi chú |
+|---|---|---|
+| `access_token` | RAM tiến trình, không ghi đĩa | Xác thực lại khi mở app |
+| `attestation_token` | RAM, TTL 5 phút | Cùng số phận |
+| `device private key` (nếu chọn (b)) | Kho hệ thống | Không đồng bộ lên cloud |
+| Log nộp bộ | `%LOCALAPPDATA%/seb_client/logs/` | Tắt trong bản phát hành |
+
+Không dùng `localStorage`/`QSettings` cho bất kỳ thứ gì nhạy cảm — đó là dữ liệu
+plaintext ai cũng đọc được.
+
+#### 1.5.4 Sửa thêm phát hiện khi triển khai Ed25519 (S0)
+
+1. **Phiên thi bị hạ `client_type` từ `seb` xuống `web`.** Nguyên nhân: chính trang
+   web nhúng trong SEB Client cũng gọi `join_exam`, mà request đó không kèm
+   attestation token, nên nhánh reconnect ghi đè `client_type = "web"`. Hệ quả
+   nặng hơn: thí sinh chỉ cần mở web app là **xoá được dấu vết SEB khỏi phiên**.
+   Đã sửa thành **chỉ nâng, không hạ** trong `exam_session_service.join_exam`.
+
+2. **`QWebEngineSettings.InspectElementEnabled` đã bị Qt 6.12 gỡ.** Viết theo tài
+   liệu cũ sẽ crash. Cách đúng là chặn qua
+   `QWebEnginePage.triggerAction` — xem `seb_client/sebclient/ui/web_page.py`.
+
+3. **Không được lưu private key dạng rõ.** Bản đầu tiên của `keystore.py` lưu
+   base64 thẳng xuống đĩa, vi phạm đúng nguyên tắc mà module đó tuyên bố. Đã
+   sửa: chỉ lưu khi mã hoá được (Windows/DPAPI); nền tảng chưa tích hợp thì
+   **không lưu gì**, khoá chỉ sống trong RAM và mỗi lần mở client là một thiết bị
+   mới (`weak_key_storage=True` để GV thấy trên dashboard).
+
+### 1.5.5 Những lỗi đã gặp thật khi dựng client (đã sửa — đừng làm lại)
+
+Ghi lại vì cả ba đều là lỗi "đọc code không thấy, chỉ chạy mới lộ":
+
+1. **`QApplication.installEventFilter()` làm segfault `QWebEngineView`.**
+   Đã kiểm chứng bằng phép thử 4 nhánh: không filter → ổn; chỉ `QShortcut` → ổn;
+   filter trên `QApplication` → **segfault**; filter trên chính `web_view` → ổn.
+   Vì vậy `KeyboardGuard` gắn filter vào `web_view`, không gắn lên `QApplication`.
+
+2. **Sai tên trường trong sự kiện `violation` của socket.** Backend đọc
+   `data["type"]` và `data["clientTimestamp"]`, **không** phải `event_type` /
+   `client_timestamp`. Gửi sai tên thì backend âm thầm rơi về mặc định
+   `TAB_SWITCH` — mọi vi phạm đều bị ghi thành chuyển tab, không có lỗi nào báo
+   ra. So khớp với `frontend/src/pages/exam/hooks/useSecurityPolicy.js`.
+
+3. **`navigation_guard` có thể rơi vào vòng lặp reload vô hạn.** `loadStarted`
+   phát ra *trước khi* `view.url()` có giá trị, nên URL rỗng bị coi là không hợp
+   lệ → reload → `load()` → phát `loadStarted` lần nữa → treo tiến trình.
+   Đã bỏ hoàn toàn `loadStarted`, chỉ chặn ở `urlChanged`, bỏ qua URL rỗng và
+   thêm cờ chống đệ quy.
+
+> **Môi trường kiểm thử:** `QT_QPA_PLATFORM=offscreen` làm QWebEngine segfault
+> ngay khi trang render (WebEngine cần GPU/X thật). Máy đã có Xwayland ở `DISPLAY=:1`
+> — kiểm thử WebEngine phải dùng display thật, không dùng offscreen.
+
+### 1.5.6 Client làm gì khi backend sập giữa ca
+
+- **Không** kết thúc phiên — thí sinh đang làm bài, mất dữ liệu là hỏng cả ca thi.
+- Hiện băng "Mất kết nối — đang thử lại", hàng đồng hồ tiếp tục chạy bằng `deadline`
+  đã nhận từ server (đây là lý do phải giữ `deadline`, không chỉ `server_time`).
+- Đồng bộ lại khi kết nối lại; nếu chờ quá `heartbeat_timeout` thì để GV quyết định.
+- Không tự tạo bài chấm điểm, không tự tính vi phạm.
+
+#### 1.5.7 `capability_matrix` — nội dung khởi tạo
+
+Đây là cấu trúc dữ liệu thật, không phải khái niệm:
+
+```python
+# seb_client/sebclient/osint/capability_matrix.py
+CAPABILITIES: dict[str, set[str]] = {
+    "windows": {"kiosk", "clipboard", "devtools", "keyboard",
+                "monitor_switch", "block_print", "block_download", "heartbeat"},
+    "macos":   {"kiosk", "clipboard", "devtools", "keyboard",
+                "monitor_switch", "block_print", "block_download", "heartbeat"},
+    "linux":   {"kiosk", "clipboard", "devtools", "keyboard",
+                "monitor_switch", "block_print", "block_download", "heartbeat"},
+    # Wayland: KHÔNG có monitor_switch -> client phải báo "không hỗ trợ đầy đủ"
+    "linux:wayland": {"kiosk", "clipboard", "devtools", "keyboard",
+                      "block_print", "block_download", "heartbeat"},
+}
+```
+
+Luật: guard nào không nằm trong tập mà adapter hiện tại trả về thì **không được
+bật im lặng** — phải gửi `violation` với `detail.unsupported = [...]` để GV biết máy
+đó không được hỗ trợ đầy đủ (Quy tắc #5).
+
+---
+
+### 1.6 Thứ tự triển khai — làm theo đúng thứ tự này
+
+Mỗi bước **để lại một thứ chạy được**. Không bao giờ dồn nhiều bước rồi mới chạy thử
+một lần — đó là cách chậm nhất để tìm lỗi.
+
+| Bước | Việc | File chính | Xong khi nào |
+|---|---|---|---|
+| **S0** | **Backend**: đăng ký khoá thiết bị + xác minh Ed25519 | `models/`, `auth_router.py`, `attestation_service.py`, `exam_namespace.py` | `POST /auth/client-devices` trả `device_id`; `client-attest` xác minh được chữ ký Ed25519 thật |
+| **S1** | Khung app: cửa sổ đăng nhập, quay vòng sự kiện đúng cách | `app.py`, `ui/login_window.py` | `python -m seb_client` mở được cửa sổ |
+| **S2** | HTTP client + đăng nhập thật | `api/client.py` | Đăng nhập được, token vào RAM |
+| **S3** | Socket.IO async + `qasync`, kết nối và `join_exam_room` | `api/heartbeat.py` | Log có `connect` + ack `success`, UI **không** đứng hình |
+| **S4** | `BaseOSAdapter` + `capability_matrix` + adapter Windows tối thiểu | `osint/*` | In ra tập capability, chưa cần guard |
+| **S5** | `ExamWindow` nạp `exam_url`, dựng `QWebEngineView` | `ui/exam_window.py` | Nạp được trang thi thật |
+| **S6** | Sinh cặp khoá Ed25519 + đăng ký thiết bị + challenge-response | `api/attestation.py`, `osint/keystore.py` | `attested: true`, `attestation_status = VERIFIED`, `device_id` khớp |
+| **S6b** | Heartbeat ký Ed25519 | `api/heartbeat.py` | Server từ chối heartbeat thiếu chữ ký hợp lệ |
+| **S7** | Guard đầu tiên: `keyboard_guard` (dễ kiểm chứng nhất) | `guards/keyboard_guard.py` | Ctrl+C/V/X, F12, chuột phải không có tác dụng |
+| **S8** | `monitor_switch` — phần giá trị nhất của Phase 1 | `osint/windows_adapter.py` | Bắt được chu kỳ Alt+Tab hoàn chỉnh (tiêu chí 1.7) |
+| **S9** | Còn lại guard: kiosk, clipboard, navigation, devtools, session | `guards/*` | Bật/tắt đúng theo `policy` |
+| **S10** | `pytest` + `test_guards.py` | `tests/` | Bật/tắt từng guard theo policy |
+| **S11** | Adapter macOS + Linux (skeleton trước, đầy đủ sau) | `osint/*` | Trả `supports` đúng, báo `unsupported` trung thực |
+| **S12** | Đóng gói Windows | `packaging/build_windows.ps1` | Chạy được file `.exe` trên máy sạch |
+| **S13** | Code signing + allowlist `client_hash` | `packaging/` | Sửa 1 byte → server từ chối |
+
+> **S1–S3 là phần dễ bị coi là hiển nhiên nên làm ẩu.** Socket async sai cách là lỗi
+> mất nhiều giờ nhất mà người mới thường gặp: cửa sổ đứng hình mỗi lần heartbeat, rồi
+> phải debug lại từ đầu. Làm cho đúng ngay từ S3.
+
+### 1.7 Tiêu chí hoàn thành Phase 1
+
+- [ ] `windows_adapter` chạy và **test trên máy thật**; `macos_adapter` + `linux_adapter` đúng interface, khai `capability_matrix` trung thực cho phần chưa kiểm thử. Xét cả hướng dẫn ở mục 6.2–6.4.
 - [ ] `python -m seb_client` mở được login → vào phòng thi → làm bài → nộp.
-- [ ] Alt+Tab sang cửa sổ khác → phát hiện trong ≤ 300 ms, có tên cửa sổ trong log.
+- [ ] **Bắt được một chu kỳ gian lận hoàn chỉnh**: `Alt+Tab → xem tài liệu ngoài → Alt+Tab về` phải bị ghi nhận, kèm **tên cửa sổ lạ** trong log.
+
+  > Đây là tiêu chí thay cho "phát hiện trong ≤ 300 ms". Con số mili-giây chỉ đo
+  > tốc độ của vòng lặp, **không** trả lời câu hỏi quan trọng là "kẻ gian lận có
+  > bị bắt không". Một chu kỳ Alt+Tab thật mất 400–600 ms, nên bắt trọn vòng mới là
+  > điều kiện cần đạt. Tiêu chí cũ vẫn đạt được ngay cả khi cấu hình sai, nên nó
+  > không có tác dụng kiểm chứng gì.
 - [ ] F12 / Ctrl+Shift+I / Ctrl+C / Ctrl+V / chuột phải → không có tác dụng.
 - [ ] Click link ngoài domain thi hoặc `window.open` → bị chặn, ghi log.
 - [ ] Trên Wayland: client **báo cáo** thiếu hỗ trợ monitor switch, không im lặng.
@@ -513,17 +789,26 @@ Mở app
 
 | # | Đe doạ | Biện pháp | Mức | Ghi chú trung thực |
 |---|---|---|---|---|
-| C1 | Giả mạo header `X-Client-Type: seb` bằng curl | Challenge HMAC nonce 1-lần; `device_secret` dẫn xuất từ salt + `SECRET_KEY`, **không lưu rõ trong DB** | **Cao** | Kẻ tấn công phải đăng nhập hợp lệ bằng tài khoản thi thật. *Đã triển khai.* |
+| C1 | Giả mạo header `X-Client-Type: seb` bằng curl | **Đang chạy (Phase 0):** challenge HMAC nonce 1-lần với `device_secret` dẫn xuất từ salt + `SECRET_KEY`. **Phase 1 sẽ thay bằng chữ ký Ed25519 bằng khoá sinh trên máy** (mục 1.5.2) | **Cao** | Kẻ tấn công phải đăng nhập hợp lệ bằng tài khoản thi thật. Mô hình Ed25519 nâng thêm: khoá riêng không rời thiết bị |
 | C2 | Replay request đã bắt được | Nonce TTL 30 s, dùng 1 lần xoá ngay; HMAC phủ cả `nonce\|version\|fingerprint` | **Cao** | *Đã triển khai + test.* |
 | C3 | Đọc đáp án từ traffic | `QuestionPublic` không có `is_correct` | **Cao** | — |
-| C4 | Sửa binary / patch file `.exe` | **Self-check hash**: client so `sha256` của file đang chạy với giá trị nhúng trong chính nó | **Trung bình** | Tự tham chiếu → người giỏi bypass được. Đây là rào chắn chặn gian lận ở mức đồ án, không phải DRM thương mại |
+| C4 | Sửa binary / patch file `.exe` | **Self-check hash** (client so `sha256` của file đang chạy với giá trị nhúng) **+ biên dịch phần lõi nhạy cảm bằng pybind11** (mục 2.4) | **Thấp–TB** | Cả hai đều tự tham chiếu và đều bypass được. `self_check` nằm trong chính binary nó bảo vệ. Đây là rào chắn mức đồ án, **không phải DRM thương mại** |
 | C5 | Debugger (OllyDbg/x64dbg/IDA/GDB/LLDB) | `IsDebuggerPresent` / `sysctl P_TRACED` / `/proc/self/status`; nếu phát hiện → **từ chối vào phòng thi + báo server** | **Thấp–TB** | Chỉ chặn được debug cấp người dùng. Kernel debugger bypass được. **Không được tuyên bố chống được** |
 | C6 | Đóng gói lại bản "đã patch" và phát cho nhau | **Code signing**: ký số binary (Windows Authenticode / macOS codesign notarize / Linux). Client kiểm chữ ký trước khi chạy; server từ chối `client_hash` không nằm trong danh sách đã ký | **TB–Cao** | Đây là biện pháp đáng tiền nhất |
-| C7 | Đọc source để hiểu cấu trúc | Build bằng **Nuitka** (biên dịch Python → C) thay vì PyInstaller (chỉ nén bytecode) | **TB** | Tốn thời gian build hơn; dùng cho bản release, giữ bản source để dev |
-| C8 | Chạy client trên máy ảo để lách | Phát hiện VM/sandbox (CPUID hypervisor bit, tên file registry `VMwareTools`, MAC OUI, tốc độ CPU…) → cảnh báo + ghi log, **không tự động đuổi** | **Thấp** | Dễ bypass. Giá trị nằm ở **bằng chứng** cho hội đồng |
+| C7 | Đọc source để hiểu cấu trúc | Build bằng **Nuitka** (biên dịch Python → C) thay vì PyInstaller (chỉ nén bytecode); phần lõi nhạy cảm dùng thêm **pybind11** (mục 2.4) | **TB** | Tốn thời gian build hơn; dùng cho bản release, giữ bản source để dev. Ghidra/IDA vẫn đọc được binary native |
+| C8 | Chạy client trong máy ảo để lách | ~~Phát hiện VM/sandbox~~ → **KHÔNG LÀM** | **Thấp** | **Ngoài phạm vi đồ án.** Vì sao: phát hiện VM là trận đấu không hồi càn, patch một hàm là lách được; mà auto-block lại báo nhầm nặng (máy lab VDI, laptop cấu hình sẵn trong VM, Hyper-V hợp pháp). Rủi ro công bằng lớn hơn lợi ích bảo mật. Xem mục 2.5 |
 | C9 | Chạy nhiều phiên / đăng nhập trùng | `DuplicateLoginGuard` phía server: 1 session active / 1 fingerprint; lần 2 → `DUPLICATE_LOGIN` + buộc kick | **Cao** | Đây là biện pháp server-side nên không thể bypass bằng patch client |
 | C10 | Ngắt mạng để né heartbeat | Server đánh dấu `DISCONNECTED` sau 30 s; hết thời gian grace → `AUTO_TIMEOUT` | **Cao** | Đã có sẵn |
 | C11 | Sửa đồng hồ máy | **Server giữ đồng hồ chuẩn** (Quy tắc #4.1). Client chỉ nhận `server_time` + `deadline` để đếm đồng hồ | **Cao** | Đã có sẵn |
+
+| C12 | **Patch thẳng hàm guard** (cho `enter_kiosk()` thành `pass`) nhưng giữ nguyên attestation | **Không có biện pháp nào chặn được ở tầng client** — đây là giới hạn cố hữu của mọi phần mềm chạy trên máy người dùng. Code signing (C6) chỉ chứng minh *binary là bản gốc*, **không** chứng minh *hành vi là bản gốc* | **Không chặn được** | **Tấn công khả dĩ nhất — và là điều phải nói thẳng trong báo cáo.** Hệ quả thực sự nằm ở C14 và ở phân tích hành vi phía server (mục 2.5) |
+| C13 | **`SECRET_KEY` yếu hoặc bị lộ** (mặc định đang nằm trong source) | Lấy từ biến môi trường, **từ chối khởi động** nếu còn giá trị mặc định; có quy trình xoay khoá | **Trung bình** *(đã hạ từ Cao sau khi chuyển sang Ed25519)* | Sau khi đổi sang cặp khoá Ed25519 sinh trên máy (mục 1.5.2), lộ `SECRET_KEY` **không còn đủ** để giả attestation — phải có private key trên đúng thiết bị. Vẫn nghiêm trọng vì mất JWT và mất khoá ký heartbeat nếu heartbeat còn dùng khoá đối xứng |
+| C14 | Client đã patch **im lặng** — không gửi violation nào | Mọi log vi phạm của phiên có `attestation_status != VERIFIED` chỉ dùng để **gợi nghi**, tuyệt đối không làm căn cứ kỷ luật; bù lại bằng phân tích hành vi ở server (mục 2.5) | **Không chặn được** | **Lỗ hổng sâu nhất, dễ bị bỏ sót nhất.** Nhật ký sạch KHÔNG phải bằng chứng nghiêm túc. Xem `SEB_GATE_DESIGN.md` mục 6 |
+
+> **Đọc bảng theo đúng thứ tự mức độ.** C12 và C14 là hai ô trống mà hệ thống **không
+> thể** đóng — phải nêu trước tiên trong báo cáo, cùng câu "không có phần mềm nào
+> chống được cái này". C13 ngược lại là lỗi **có thể** đóng, và là điều kiện tiên
+> quyết cho mọi biện pháp mạnh khác trong bảng này.
 
 > Bảng này sẽ vào báo cáo gần như nguyên văn, cột "Ghi chú trung thực" là phần **quan trọng nhất** — thể hiện độ trung thực học thuật theo Quy tắc #5.
 
@@ -552,7 +837,102 @@ Mở app
 - [ ] Bảng `signed_client_releases` (version, hash, os, released_at) — GV đăng ký bản hợp lệ
 - [ ] `attestation_service.raise_alert()` khi client chưa attest nhưng cờ `require_safe_browser` đang bật
 
-### 2.4 Tiêu chí hoàn thành Phase 2
+### 2.4 Tăng chi phí decompile: biên dịch phần C++ nhạy cảm bằng pybind11
+
+> **Đọc trước:** pybind11 **KHÔNG mã hóa gì cả**. Nó là công cụ để viết extension
+> module bằng C++ cho Python; kết quả là một file nhị phân native (`.pyd`/`.so`).
+> Vì vậy trong báo cáo **không được** viết "mã hóa chống decompile" — ghi đúng là
+> **"biên dịch phần lõi nhạy cảm sang native code để nâng chi phí phân tích tĩnh"**.
+
+#### 2.4.1 Vì sao chọn pybind11, và khi nào **không** dùng
+
+| | Nuitka (đã chọn ở C7) | pybind11 |
+|---|---|---|
+| Áp dụng cho | Toàn bộ client | **Chỉ một vài module** |
+| Kết quả | Binary native, bytecode khó đọc | `.pyd`/`.so`, phải disassemble bằng Ghidra/IDA |
+| Debug | Debugger Python vẫn dùng được | Phải build kèm debug info |
+| Chi phí build | Trung bình | Cao — thêm toolchain C++ cho 3 OS |
+
+**Nguyên tắc chọn phạm vi:** chỉ đưa sang C++ những module mà *lộ ra là hỏng được*
+nhiều nhất. Toàn bộ UI và business logic vẫn viết Python.
+
+#### 2.4.2 Module nên chuyển sang C++
+
+| Module | Vì sao nhạy cảm |
+|---|---|
+| `integrity/self_check` | Chạy **trước** mọi thứ khác; nếu bị vá thì tự kiểm tra vô nghĩa |
+| `integrity/anti_debug` | Trả kết quả cho quyết định "có cho vào phòng thi không" |
+| `osint/*_adapter` | `GetForegroundWindow` là cơ chế cốt lõi nhất Phase 1; hook được thì bằng 0 |
+| ký Ed25519 (device key) | Private key trong RAM lúc ký — đọc được nếu chiếm quyền máy |
+
+Không chuyển: `ui/`, `api/`, `session_guard` — các chỗ này rò rỉ không làm hỏng bảo
+mật, mà chuyển C++ chỉ làm khó debug.
+
+#### 2.4.3 Bắt buộc đi kèm — bỏ sót là vô nghĩa
+
+```bash
+# Không làm những điều này thì pybind11 chỉ là đổi đuôi file
+c++ -O2 -fvisibility=hidden -fvisibility-inlines-hidden \
+    -fdata-sections -ffunction-sections \
+    -g0 -Wl,--strip-all \
+    -DPYBIND11_COMPILER_TYPE='"_gcc"' \
+    -shared -o _guards.so guards.cpp
+```
+
+- `-fvisibility=hidden` + `-g0` + `--strip-all`: bỏ tên symbol. **Thiếu phần này thì
+  kẻ tấn công đọc tên hàm là biết cấu trúc, không cần decompile.**
+- **Không** để file `.cpp` nguồn vào gói phát hành.
+- `-D` các giá trị cấu hình phải **không** nhúng bí mật vào binary.
+
+#### 2.4.4 Điều pybind11 **không** làm được (phải nói rõ trong báo cáo)
+
+1. **Không chống được hook lúc chạy.** Attacker chạy đúng `.so` gốc rồi hook hàm ký
+   Ed25519, hoặc đọc private key trong RAM. Cùng cấp độ với mọi phần mềm native.
+2. **Không thay thế code signing (C6).** `signed_client_releases` + `client_hash`
+   mới là thứ khiến "chỉ bản gốc mới chạy được". pybind11 **cộng** vào đó.
+3. **Không làm guard trở nên đáng tin.** Guard vẫn chạy trên máy thí sinh — xem mục 2.2
+   và `docs/SEB_GATE_DESIGN.md` mục 1.2.
+4. **Binary nhạy cảm thường bị Ghidra/IDA xử lý trong vài giờ** nếu được kỹ sư.
+   Chỉ nâng chi phí, không chặn.
+
+> **Kết luận phần này:** pybind11 là biện pháp **hạn mức 1** — rẻ, hiệu quả ở mức
+> "đồ án", và nên nói thẳng vậy trong báo cáo. Giá trị lớn nhất vẫn nằm ở C6
+> (code signing + allowlist hash) và ở server-side.
+
+#### 2.4.5 Việc cần làm
+
+- [ ] `seb_client/native/guards.cpp` + `guards.h` — skeleton 4 module ở mục 2.4.2
+- [ ] `native/build.py` — một lệnh build cho 3 OS, kèm cờ ở mục 2.4.3
+- [ ] `tests/test_native_guards.py` — `import _guards` phải hoạt động trên cả 3 OS
+- [ ] Ghi rõ trong báo cáo: **"biên dịch native, không phải mã hóa"**
+
+### 2.5 Bù lưng bằng phân tích hành vi phía server
+
+> Mục này trả lời trực tiếp cho **C12** và **C14**: nếu client đã patch thì mọi guard
+> và mọi log vi phạm đều vô dụng. Vậy còn lại gì để **phát hiện** gian lận?
+>
+> Câu trả lời: **dữ liệu server tự thu**, không phải dữ liệu client tự khai.
+
+Server đã có sẵn những thứ sau, chỉ chưa dùng để phân tích:
+
+| Tín hiệu | Nguồn | Gợi ý gian lận |
+|---|---|---|
+| Phân bố thời gian trả lời | `violation_logs.server_timestamp` + `save-answer` | Phân bố quá hẹp hoặc quá đều = trả lời theo bảng |
+| Điểm theo thời gian | `exam_sessions` + đáp án đúng (chỉ server biết) | Điểm tăng đột ngột ở giữa ca |
+| Nhịp gọi API | log socket | Nhịp bất thường so với nhịp `heartbeat` đã khai |
+| Cổ kết nối | `ip_address`, `user_agent` | Đổi IP giữa cuộc thi |
+| Tỉ lệ bỏ trống | đề có `đáp án sai` không được gửi lên client | Bỏ trống bất thường ở một nhóm câu |
+
+**Nguyên tắc:** chỉ đưa ra **cảnh báo để GV xem**, không tự động kết luận. Lý do
+đã nêu ở C14: hệ thống không đủ dữ liệu để kết luận, và kết luận sai thì tệ hơn
+bỏ sót.
+
+**Giới hạn phải nói trong báo cáo:** các thang đo trên cần một *nhóm mẫu* để so
+sánh (chính lớp thi trước, hoặc vài ca thi đã diễn ra). Với một đề thi đơn lẻ và
+số thí sinh ít, phân tích này gần như không có giá trị. **Đây là hạn chế thật, đừng
+ghi vào báo cáo như một tính năng đã có.**
+
+### 2.6 Tiêu chí hoàn thành Phase 2
 
 - [ ] `curl` giả header `X-Client-Type: seb` → server **từ chối** phiên thi với `attestation_status = FAILED`.
 - [ ] Sửa 1 byte trong binary → client từ chối chạy.
@@ -624,5 +1004,69 @@ Mở app
 | Nuitka build chậm / lỗi trên máy khác | Thấp | Build trên CI hoặc 1 máy build cố định, phát hành bản `.exe`/`.dmg`/`.AppImage` sẵn |
 | Wayland giới hạn nhiều | Trung bình | Nêu rõ trong báo cáo; khuyến nghị phòng thi dùng Windows |
 | Hết giờ làm đồ án | Cao | Mỗi Phase có tiêu chí hoàn thành rõ ràng, dừng được sau Phase 0 |
+
+### 6.1 Ước lượng công sức
+
+> Con số dưới đây là **ước lượng theo ngày công của một người**, không phải cam kết
+> chắc chắn. Mục đích là biết *đang ở đâu* để cắt đúng chỗ khi kịp — không phải để
+> trích dẫn trong báo cáo. Cập nhật lại cột "Đã xong" sau mỗi tuần.
+
+| Hạng mục | Công sức (ngày công) | Đã xong | Ghi chú |
+|---|---|---|---|
+| Phase 0 — nền tảng web + toggle + config | 12–16 | ✅ | Đã nộp phần bắt buộc |
+| Phase 1.1–1.2 — khung app, cấu trúc `seb_client/` | 2–3 | ☐ | Xây khung trước, để có thứ chạy được |
+| Phase 1.3 — `BaseOSAdapter` + adapter **Windows** | 4–5 | ☐ | OS quan trọng nhất, làm kỹ |
+| Phase 1.3 — adapter **macOS** | 3–4 | ☐ | Cần máy mac để test |
+| Phase 1.3 — adapter **Linux** | 3–4 | ☐ | Cần máy Linux để test |
+| Phase 1.3 — `capability_matrix` + báo cáo OS không hỗ trợ | 1 | ☐ | Rẻ nhưng bắt buộc về mặt liêm chính học thuật |
+| Phase 1.4 — `ExamWindow` + 6 guard | 5–7 | ☐ | Lớp dày nhất của Phase 1 |
+| Phase 1.5 — test + khửa lỗi guard | 3–4 | ☐ | Không thể bỏ qua |
+| **S0 — Backend: đăng ký khoá thiết bị + Ed25519** | 3–4 | ☐ | **Mới.** Bảng `client_devices`, `POST /auth/client-devices`, đổi `verify_attestation` sang Ed25519, heartbeat ký chữ ký. Mục 1.5.2 |
+| Keystore adapter: DPAPI / Keychain / Secret Service | 2–3 | ☐ | **Mới.** Xem mục 1.5.2.1 về máy không có kho hệ thống |
+| Phase 2.3.1–2.3.2 — self-check + anti-debug (attestation đã làm ở S0) | 2–4 | ☐ | Nẹp rút lại vì phần xác thực đã tính ở S0 |
+| Phase 2.4 — pybind11 cho 4 module nhạy cảm | 3–5 | ☐ | Mức hạn chế 1, xem mục 2.4.4 |
+| Phase 2.3.3 — đóng gói **Windows** | 2–3 | ☐ | Phát hành `.exe` |
+| Phase 2.3.3 — đóng gói macOS + Linux | 3–4 | ☐ | Cần ký chứng thư số |
+| Phase 3 — test, tài liệu, báo cáo | 3–4 | ☐ | |
+| **Tổng** | **≈ 51–69** | | | Tăng so với bản cũ vì chọn mô hình khoá thiết bị (mục 1.5.2) |
+
+### 6.2 Về việc test trên máy không thuộc hệ đang phát triển
+
+Đây là rủi ro thực tế lớn nhất của Phase 1, và plan **không được giấu nhẹm**:
+
+| Vấn đề | Xử lý |
+|---|---|
+| **Không có máy macOS** | Adapter macOS viết theo tài liệu API nhưng **không chạy được**. Trong `capability_matrix` khai `supports = set()` cho các cơ chế chưa kiểm chứng, và client báo "máy này chưa được hỗ trợ đầy đủ" thay vì giả vờ chống được |
+| **Không có máy Linux** | Tương tự. Ưu tiên X11 trước, Wayland ghi rõ `❌` |
+| Dùng máy ảo / nhờ bạn cùng học | Chấp nhận được cho **smoke test**, **không thay thế** test thật: `GetForegroundWindow` trên máy ảo có thể trả kết quả giống hệt máy thật, nên không phát hiện được lỗi mà chỉ máy thật mới lộ |
+| Đóng gói + ký số 3 OS | Không tự làm được nếu không có tài khoản nhà phát hành. Phát hành **chỉ Windows** và ghi rõ giới hạn |
+
+> **Cách trình bày trong báo cáo:** nêu thẳng *"adapter Windows đã kiểm thử trên máy
+> thật; adapter macOS/Linux viết theo đặc tả API nhưng **chưa kiểm thử** vì thiếu
+> phần cứng"*. Đây là câu trả lời học thuật chấp nhận được và thể hiện độ trung thực.
+> Nhưng tuyên bố cả 3 OS "đã hỗ trợ" thì bị hỏi một câu là sập — và hỏi đúng câu đó
+> thì không có đường cứu.
+
+### 6.3 Nguyên tắc "cứ làm hết sức" — cách áp dụng cho đúng
+
+Làm hết 3 OS là quyết định hợp lý và plan này giữ nguyên phạm vi đó. Nhưng để công
+sức đó không bị phí phạm, cần trả lời trước câu hỏi: **nếu chỉ kịp một OS thì
+nên kịp OS nào?** Trả lời: **Windows**.
+
+Vì vậy thứ tự thực hiện nên là **tuần tự, không chia đều**:
+
+1. Làm cho chạy được + test trên Windows trước → có thể demo bất cứ lúc nào.
+2. Làm macOS/Linux sau, mỗi cái là một adapter độc lập, không phải viết lại logic.
+
+Như vậy kịp đâu dừng đó mà phần đã xong vẫn **đúng và chạy được**, thay vì ba OS
+cùng dở nên không bên nào trình diễn được.
+
+### 6.4 Điều chỉnh tiêu chí 1.7 cho khớp thực tế
+
+- [ ] ~~Chạy được trên cả 3 OS từ cùng codebase~~ → **`windows_adapter` chạy và test
+      trên máy thật; `macos_adapter` + `linux_adapter` đúng interface, khai
+      `capability_matrix` trung thực cho phần chưa kiểm thử.**
+- [ ] `pytest seb_client/tests/` — guard nào bật/tắt đúng theo policy (chạy được
+      không cần đủ 3 OS).
 
 **Khuyến nghị thứ tự nộp:** nộp **Phase 0** trước. Phase 1–2 là phần "ăn thêm điểm". Nếu thời gian khan, dừng sau Phase 0 vẫn là một đồ án hoàn chỉnh hợp lệ.

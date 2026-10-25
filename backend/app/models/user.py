@@ -26,3 +26,4 @@ class User(Base):
     supervised_schedules = relationship("ExamSchedule", back_populates="supervisor")
     exam_sessions = relationship("ExamSession", back_populates="student")
     audit_logs = relationship("AuditLog", back_populates="user")
+    client_devices = relationship("ClientDevice", back_populates="user", cascade="all, delete-orphan")

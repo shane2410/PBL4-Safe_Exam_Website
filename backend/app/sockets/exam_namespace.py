@@ -204,10 +204,34 @@ def register_exam_socket_handlers():
                                 skip_auth_check=True
                             )
                             max_limit = AnticheatService.resolve_max_violations(db, session)
-                            # Notify student client to lock and submit
+
+                            # Nạp lại phiên sau khi submit để có số liệu chính xác
+                            # (submit_exam có thể đã thay đổi status/counters).
+                            db.refresh(session)
+                            student_name = session.student.full_name if session.student else "Thí sinh"
+
+                            # Báo cho học sinh: khoá bài, nộp.
                             await sio.emit("force_submit", {
                                 "reason": f"Vượt quá số lần vi phạm an toàn cho phép ({max_limit} lần). Bài thi đã tự động nộp."
                             }, to=sid)
+
+                            # Báo cho GIÁM SÁT.
+                            #
+                            # Trước đây chỉ báo cho học sinh, nên trên màn giám sát
+                            # bộ đếm đơn giản là NGỪNG TĂNG mà không có lý do — giáo
+                            # viên tưởng hệ thống hỏng hoặc thí sinh ngừng chuyển tab.
+                            # Sau khi phiên đã SUBMITTED, record_violation bỏ qua mọi
+                            # vi phạm tiếp theo (session.status != IN_PROGRESS) nên
+                            # bộ đếm đứng yên cho tới lúc GV tự nộp tay.
+                            await sio.emit("student_force_submitted", {
+                                "session_id": session.id,
+                                "student_name": student_name,
+                                "reason": f"Vượt quá số lần vi phạm an toàn cho phép ({max_limit} lần). Bài thi đã tự động nộp.",
+                                "tab_switch_count": session.tab_switch_count,
+                                "fullscreen_exit_count": session.fullscreen_exit_count,
+                                "risk_score": session.risk_score,
+                                "max_violations": max_limit,
+                            }, room=f"monitor_{room_code.upper()}")
 
             return {"status": "ok", "threshold_exceeded": exceeded}
         finally:

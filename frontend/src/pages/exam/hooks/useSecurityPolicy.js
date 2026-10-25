@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useRef, useState } from 'react'
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { getSocket } from '../../../services/socketClient'
 import policyService from '../../../services/policyService'
 
@@ -21,9 +21,20 @@ export function useSecurityPolicy(examState, onForceSubmit) {
   const forceSubmitRef = useRef(onForceSubmit)
   forceSubmitRef.current = onForceSubmit
 
+  // Khi trang này chạy BÊN TRONG SEB Client, chính SEB Client đã giữ socket
+  // và tự gửi heartbeat. Nếu trang web lại tự mở socket thì server thấy 2
+  // kết nối cho cùng một phiên và ghi DUPLICATE_LOGIN rồi buộc nộp bài — tức
+  // là dùng đúng SEB Client thì lại bị phạt. Vì vậy khi `embedded=1`, trang
+  // nhường socket hoàn toàn cho client bọc nó.
+  const embeddedInSeb = useMemo(
+    () => new URLSearchParams(window.location.search).get('embedded') === '1',
+    [],
+  )
+
   // --- Kết nối socket, subscribe phòng thi ---
   useEffect(() => {
     if (!examState?.session_token || !examState?.room_code) return undefined
+    if (embeddedInSeb) return undefined
 
     const socket = getSocket()
     socketRef.current = socket
@@ -50,7 +61,7 @@ export function useSecurityPolicy(examState, onForceSubmit) {
       socket.off('connect')
       socket.off('force_submit')
     }
-  }, [examState?.session_token, examState?.room_code])
+  }, [examState?.session_token, examState?.room_code, embeddedInSeb])
 
   // --- Heartbeat định kỳ: server giữ đồng hồ chuẩn (Quy tắc #4.1) ---
   useEffect(() => {
@@ -71,7 +82,13 @@ export function useSecurityPolicy(examState, onForceSubmit) {
   const logViolation = useCallback(
     (type, detail = {}) => {
       const socket = socketRef.current
-      if (!socket || !socket.connected) return
+      if (!socket || !socket.connected) {
+        // Khi nhúng trong SEB Client, việc báo vi phạm do CHÍNH SEB Client đảm
+        // nhiệm (nó chặn ở tầng hệ đối hành, mạnh hơn các hook trong trang).
+        // Hook ở đây chỉ bắt được sự kiện trong DOM — nếu cũng báo, cùng một
+        // hành vi sẽ bị đếm hai lần và làm sai ngưỡng trên dashboard.
+        return
+      }
       socket.emit('violation', {
         type,
         detail,

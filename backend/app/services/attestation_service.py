@@ -61,9 +61,28 @@ def _purge_expired_nonces() -> None:
         _pending_nonces.pop(k, None)
 
 
-def build_attest_message(nonce: str, client_version: str, device_fingerprint: str) -> bytes:
-    """Chuẩn hoá message trước khi ký — client và server PHẢI dùng cùng công thức."""
-    return f"{nonce}|{client_version}|{device_fingerprint}".encode("utf-8")
+def build_attest_message(
+    nonce: str,
+    client_version: str,
+    device_fingerprint: str,
+    device_id: str = "",
+) -> bytes:
+    """Chuẩn hoá message trước khi ký — client và server PHẢI dùng cùng công thức.
+
+    `device_id` rỗng là đường HMAC cũ; có giá trị là đường Ed25519 mới. Rỗng
+    phải nằm CUỐI chuỗi để hai nhánh không còn chung tiền tố chữ ký.
+    """
+    return f"{nonce}|{client_version}|{device_fingerprint}|{device_id}".encode("utf-8")
+
+
+_FAIL_MESSAGES = {
+    "NONCE_INVALID_OR_EXPIRED": "Nonce không hợp lệ hoặc đã hết hạn",
+    "NONCE_EXPIRED": "Nonce đã hết hạn",
+    "NONCE_USER_MISMATCH": "Nonce không thuộc về tài khoản hiện tại",
+    "SIGNATURE_MISMATCH": "Chữ ký không hợp lệ",
+    "DEVICE_NOT_REGISTERED": "Thiết bị chưa đăng ký khoá công khai",
+    "DEVICE_REVOKED": "Thiết bị đã bị thu hồi",
+}
 
 
 def _derive_device_secret(user: User) -> bytes:
@@ -141,19 +160,30 @@ class AttestationService:
             AttestationService._record_failure(db, session_id, user, "NONCE_USER_MISMATCH", data)
             return _failed(now, "Nonce không thuộc về tài khoản hiện tại")
 
-        # 3. Tính lại chữ ký, so sánh thời gian hằng số
-        device_secret = _derive_device_secret(user)
-        message = build_attest_message(data.nonce, data.client_version, data.device_fingerprint)
-        expected_sig = hmac.new(device_secret, message, hashlib.sha256).digest()
-
-        try:
-            provided_sig = base64.b64decode(data.signature, validate=True)
-        except Exception:
-            provided_sig = b""
-
-        if not hmac.compare_digest(expected_sig, provided_sig):
-            AttestationService._record_failure(db, session_id, user, "SIGNATURE_MISMATCH", data)
-            return _failed(now, "Chữ ký không hợp lệ")
+        # 3. Xác minh chữ ký.
+        #
+        # Ưu tiên Ed25519: nếu client gửi `device_id`, server xác minh bằng
+        # public key đã đăng ký. Đây là đường mới (mục 1.5.2 PLAN.md) — server
+        # KHÔNG THỂ tự sinh chữ ký hợp lệ vì không giữ private key.
+        #
+        # HMAC bên dưới là đường CŨ, giữ lại để client đã cài trước không bị
+        # đột ngột không vào được phòng thi. Sẽ gỡ khi đủ client dùng Ed25519.
+        if data.device_id:
+            verified, reason = AttestationService._verify_ed25519(
+                db, user, data
+            )
+            if not verified:
+                AttestationService._record_failure(db, session_id, user, reason, data)
+                return _failed(now, _FAIL_MESSAGES.get(reason, "Xác thực thất bại"))
+        else:
+            verified, reason = AttestationService._verify_legacy_hmac(user, data)
+            if not verified:
+                AttestationService._record_failure(db, session_id, user, reason, data)
+                return _failed(now, _FAIL_MESSAGES.get(reason, "Xác thực thất bại"))
+            logger.warning(
+                "Client %s của user=%s vẫn dùng HMAC cũ — nên chuyển sang Ed25519",
+                data.client_version, user.username,
+            )
 
         # 4. Hợp lệ -> sinh attestation_key cho heartbeat, lưu salt để xác minh về sau
         key_salt = secrets.token_hex(16)
@@ -181,10 +211,46 @@ class AttestationService:
             client_type="seb",
             client_version=data.client_version,
             device_fingerprint=data.device_fingerprint,
+            device_id=data.device_id,
             attestation_key=base64.b64encode(attestation_key).decode("utf-8"),
             attestation_token=attestation_token,
             server_time=now,
         )
+
+    @staticmethod
+    def _verify_ed25519(db: Session, user: User, data: ClientAttestRequest):
+        """Xác minh chữ ký Ed25519 bằng public key của thiết bị. Trả (ok, reason)."""
+        from app.services.client_device_service import ClientDeviceService, DeviceKeyError
+
+        try:
+            device = ClientDeviceService.get_active(db, user.id, data.device_id)
+        except DeviceKeyError as exc:
+            return False, str(exc)
+
+        message = build_attest_message(
+            data.nonce, data.client_version, data.device_fingerprint, data.device_id
+        )
+        if not ClientDeviceService.verify_signature(device, message, data.signature):
+            return False, "SIGNATURE_MISMATCH"
+
+        ClientDeviceService.touch(db, device)
+        return True, "OK"
+
+    @staticmethod
+    def _verify_legacy_hmac(user: User, data: ClientAttestRequest):
+        """Đường cũ: HMAC với `device_secret`. Giữ để tương thích ngược."""
+        device_secret = _derive_device_secret(user)
+        message = build_attest_message(
+            data.nonce, data.client_version, data.device_fingerprint, ""
+        )
+        expected_sig = hmac.new(device_secret, message, hashlib.sha256).digest()
+        try:
+            provided_sig = base64.b64decode(data.signature, validate=True)
+        except Exception:
+            provided_sig = b""
+        if not hmac.compare_digest(expected_sig, provided_sig):
+            return False, "SIGNATURE_MISMATCH"
+        return True, "OK"
 
     @staticmethod
     def _record(

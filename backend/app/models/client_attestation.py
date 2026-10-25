@@ -12,6 +12,7 @@ class ClientAttestation(Base):
     __tablename__ = "client_attestations"
     __table_args__ = (
         Index("idx_attestation_session", "session_id", "verified"),
+        Index("idx_attestation_device", "device_id", "verified"),
     )
 
     id = Column(Integer, primary_key=True, autoincrement=True, index=True)
@@ -19,6 +20,8 @@ class ClientAttestation(Base):
     client_type = Column(String(20), nullable=False)  # web | seb
     client_version = Column(String(20), nullable=True)
     device_fingerprint = Column(String(128), nullable=True)
+    # Thiết bị Ed25519 đã xác thực (NULL với client dùng HMAC cũ).
+    device_id = Column(String(32), nullable=True)
     verified = Column(Boolean, nullable=False, default=False)
     verification_detail = Column(String(255), nullable=True)
     # Salt để dẫn xuất lại attestation_key khi xác minh heartbeat, không lưu khoá rõ.

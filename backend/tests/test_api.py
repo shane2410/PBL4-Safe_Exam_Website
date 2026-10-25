@@ -96,8 +96,9 @@ def test_student_save_answer_and_submit():
     first_q = questions[0]
     first_opt = first_q["options"][0]
     save_res = client.post(
-        f"/api/exam-sessions/save-answer?session_token={session_token}",
+        "/api/exam-sessions/save-answer",
         json={
+            "session_token": session_token,
             "question_id": first_q["id"],
             "selected_option_ids": [first_opt["id"]]
         },
@@ -106,8 +107,8 @@ def test_student_save_answer_and_submit():
     assert save_res.status_code == 200
 
     submit_res = client.post(
-        f"/api/exam-sessions/submit?session_token={session_token}",
-        json={"submit_type": "MANUAL"},
+        "/api/exam-sessions/submit",
+        json={"session_token": session_token, "submit_type": "MANUAL"},
         headers=headers
     )
     assert submit_res.status_code == 200
@@ -128,16 +129,20 @@ def test_session_ownership_verification():
     token2 = res2.json()["access_token"]
     headers2 = {"Authorization": f"Bearer {token2}"}
 
+    # `session_token` phải nằm trong BODY. Trước đây test truyền bằng query
+    # param nên nhận 422 (thiếu trường bắt buộc) và KHÔNG BAO GIỜ chạm tới
+    # nhánh kiểm tra sở hữu — test xanh/vang ở đây không có ý nghĩa bảo mật.
+    # Xem docstring của save-answer trong exam_session_router.py.
     save_attack = client.post(
-        f"/api/exam-sessions/save-answer?session_token={token_sess1}",
-        json={"question_id": q1_id, "selected_option_ids": [1]},
+        "/api/exam-sessions/save-answer",
+        json={"session_token": token_sess1, "question_id": q1_id, "selected_option_ids": [1]},
         headers=headers2
     )
     assert save_attack.status_code == 403, "Vulnerability: Student 2 was able to modify Student 1's answers!"
 
     submit_attack = client.post(
-        f"/api/exam-sessions/submit?session_token={token_sess1}",
-        json={"submit_type": "MANUAL"},
+        "/api/exam-sessions/submit",
+        json={"session_token": token_sess1, "submit_type": "MANUAL"},
         headers=headers2
     )
     assert submit_attack.status_code == 403, "Vulnerability: Student 2 was able to submit Student 1's exam!"

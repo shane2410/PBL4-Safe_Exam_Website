@@ -22,6 +22,9 @@ class ClientAttestRequest(BaseModel):
     client_version: str = Field(..., max_length=20)
     device_fingerprint: str = Field(..., max_length=128)
     signature: str = Field(..., min_length=16, max_length=256)
+    # Có `device_id` -> xác minh Ed25519 bằng public key đã đăng ký.
+    # Rỗng -> rơi về HMAC cũ (chỉ để tương thích ngược, sẽ gỡ).
+    device_id: Optional[str] = Field(default=None, max_length=32)
 
 
 class ClientAttestResponse(BaseModel):
@@ -33,6 +36,7 @@ class ClientAttestResponse(BaseModel):
     client_type: str
     client_version: Optional[str] = None
     device_fingerprint: Optional[str] = None
+    device_id: Optional[str] = None
     attestation_key: Optional[str] = None
     # Token ngắn hạn (5 phút) cần gửi kèm ở header `X-Attestation-Token` khi
     # gọi join_exam. Không có nó, server coi client là chưa xác thực.

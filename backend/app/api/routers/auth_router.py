@@ -6,11 +6,16 @@ from app.dependencies.auth import get_current_user
 from app.dependencies.client_identity import get_client_identity, ClientIdentity
 from app.models.user import User
 from app.schemas.auth_schema import LoginRequest, RegisterRequest, TokenResponse, UserResponse
+from app.schemas.client_device_schema import (
+    ClientDeviceRegisterRequest,
+    ClientDeviceResponse,
+)
 from app.schemas.client_attestation_schema import (
     ClientAttestRequest, ClientAttestResponse, ClientNonceResponse
 )
 from app.services.auth_service import AuthService
 from app.services.attestation_service import AttestationService
+from app.services.client_device_service import ClientDeviceService
 
 router = APIRouter(prefix="/auth", tags=["Authentication"])
 
@@ -37,6 +42,24 @@ def register(reg_data: RegisterRequest, db: Session = Depends(get_db)):
 def get_current_user_profile(current_user: User = Depends(get_current_user)):
     """Get profile of current logged-in user."""
     return UserResponse.model_validate(current_user)
+
+
+@router.post("/client-devices", response_model=ClientDeviceResponse)
+def register_client_device(
+    payload: ClientDeviceRegisterRequest,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user)
+):
+    """Đăng ký khoá công khai Ed25519 của thiết bị (mục 1.5.2 PLAN.md).
+
+    Endpoint này KHÔNG làm cho thiết bị trở thành SEB hợp lệ — nó chỉ lưu public
+    key để `client-attest` xác minh được chữ ký sau đó. Giá trị thật nằm ở chỗ
+    server KHÔNG THỂ tự sinh chữ ký hợp lệ.
+
+    Gọi lại với cùng public key trả `already_registered=true` để client khôi
+    phục sau khi thí sinh cài lại máy mà không tạo bản ghi rác.
+    """
+    return ClientDeviceService.register(db, current_user, payload)
 
 
 # --- Client attestation (Phase 0 — xác thực Safe Exam Browser Client) ---

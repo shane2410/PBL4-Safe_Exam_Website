@@ -45,6 +45,17 @@ def _get_deadline(session: ExamSession, schedule: ExamSchedule) -> datetime:
     return min(end_by_duration, schedule_end)
 
 
+def _device_id_from_fingerprint(fingerprint: str | None) -> str | None:
+    """device_id là 16 ký tự đầu của fingerprint (cùng sha256(public_key)).
+
+    Suy ra từ fingerprint vì ClientIdentity chỉ mang fingerprint; tránh thêm
+    một header nữa chỉ để truyền cùng một thông tin.
+    """
+    if not fingerprint or len(fingerprint) < 16:
+        return None
+    return fingerprint[:16]
+
+
 class ExamSessionService:
     @staticmethod
     def join_exam(
@@ -104,6 +115,7 @@ class ExamSessionService:
                 client_type="seb" if is_verified_seb else "web",
                 client_version=identity.client_version,
                 device_fingerprint=identity.device_fingerprint,
+                device_id=_device_id_from_fingerprint(identity.device_fingerprint),
                 attestation_status=attestation_status,
             )
             try:
@@ -132,12 +144,20 @@ class ExamSessionService:
                     session.user_agent = user_agent
             # Reconnect bằng client khác -> cập nhật thông tin client, nếu đã xác thực
             # thì nâng trạng thái lại tương ứng (VD: GV mới bật cờ giữa kỳ thi).
-            session.client_type = "seb" if is_verified_seb else "web"
-            session.client_version = identity.client_version or session.client_version
-            session.device_fingerprint = identity.device_fingerprint or session.device_fingerprint
+            # CHỈ NÂNG, KHÔNG HẠ. Một yêu cầu join không kèm attestation token
+            # (VD: chính trang web nhúng trong SEB Client gọi lại join_exam) KHÔNG
+            # được xoá dấu vết client đã xác thực — nếu không, thí sinh chỉ cần
+            # mở web app là mất hoàn toàn dấu vết SEB khỏi phiên.
             if is_verified_seb:
+                session.client_type = "seb"
                 session.attestation_status = "VERIFIED"
-            elif seb_required:
+            session.client_version = identity.client_version or session.client_version
+            if identity.device_fingerprint:
+                session.device_fingerprint = identity.device_fingerprint
+                session.device_id = _device_id_from_fingerprint(
+                    identity.device_fingerprint
+                ) or session.device_id
+            elif seb_required and session.attestation_status != "VERIFIED":
                 session.attestation_status = "REQUIRED_MISSING"
             try:
                 db.commit()
@@ -162,6 +182,7 @@ class ExamSessionService:
                     client_type="seb",
                     client_version=identity.client_version,
                     device_fingerprint=identity.device_fingerprint,
+                device_id=_device_id_from_fingerprint(identity.device_fingerprint),
                     verified=True,
                     verification_detail="OK_ON_JOIN",
                     key_salt=secrets.token_hex(16),

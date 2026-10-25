@@ -10,6 +10,7 @@ from app.models.exam_question import ExamQuestion
 from app.models.exam_schedule import ExamSchedule
 from app.models.exam_session import ExamSession
 from app.models.client_attestation import ClientAttestation
+from app.models.client_device import ClientDevice
 from app.models.student_answer import StudentAnswer
 from app.models.violation_log import ViolationLog
 from app.models.audit_log import AuditLog
@@ -28,6 +29,7 @@ __all__ = [
     "ExamSchedule",
     "ExamSession",
     "ClientAttestation",
+    "ClientDevice",
     "StudentAnswer",
     "ViolationLog",
     "AuditLog",

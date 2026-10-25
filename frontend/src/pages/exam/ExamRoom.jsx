@@ -40,6 +40,9 @@ export default function ExamRoom() {
   const [remaining, setRemaining] = useState(0)
   const [confirmSubmit, setConfirmSubmit] = useState(false)
   const [submitting, setSubmitting] = useState(false)
+  // Phiên đã bị khoá: server đã thu bài (cưỡng chế vì vượt ngưỡng, hoặc thí sinh
+  // nộp xong). Mọi cơ chế giám sát phải DỪNG, và bộ đếm phải ngừng tăng.
+  const [locked, setLocked] = useState(false)
   const [serverNotice, setServerNotice] = useState('')
   // false = đang ở màn "sẵn sàng", true = đã bấm Bắt đầu thi.
   // Bắt buộc có bước này vì trình duyệt chỉ cho gọi requestFullscreen() khi
@@ -76,10 +79,50 @@ export default function ExamRoom() {
     join()
   }, [roomCode, join])
 
+  // Định nghĩa TRƯỚC handleForceSubmit.
+  // handleForceSubmit gọi submitExam; nếu khai báo sau bằng `const`, thì
+  // khi server đẩy force_submit tới rất sớm (socket vừa kết nối lại lúc
+  // mount) sẽ rơi vào vùng chết tạm (TDZ) và ném ReferenceError.
+  const submitExam = async (submitType = 'MANUAL') => {
+    if (!state?.session_token) return
+    setSubmitting(true)
+    // Khoá ngay khi bắt đầu nộp, kể cả khi thất bại — tránh khoảng thời gian
+    // bài đã thu mà bộ đếm vẫn chạy.
+    setLocked(true)
+    try {
+      await apiClient.post('/exam-sessions/submit', {
+        submit_type: submitType,
+        session_token: state.session_token,
+      })
+      navigate('/exam/results')
+    } catch (err) {
+      const status = err?.response?.status
+      const message = extractErrorMessage(err, 'Không nộp được bài.')
+
+      // 404 = phiên thi không còn tồn tại trên máy chủ (GV xoá ca, ca bị huỷ,
+      // hoặc dữ liệu được dọn). Giữ người dùng lại trong phòng là vô nghĩa —
+      // mọi thao tác sau đó cũng sẽ hỏng — nên dẫn họ ra khỏi phòng kèm lý do.
+      if (status === 404 || status === 403) {
+        setServerNotice(message)
+        setTimeout(() => navigate('/exam/join', { state: { notice: message } }), 2500)
+        return
+      }
+
+      setServerNotice(message)
+    } finally {
+      setSubmitting(false)
+    }
+  }
+
   const handleForceSubmit = useCallback(
     (payload) => {
       setServerNotice(payload?.reason || 'Phiên thi đã kết thúc do vượt ngưỡng vi phạm.')
       setConfirmSubmit(false)
+      // Khoá phiên ngay lập tức: nếu không, sau khi bị thu bài các hook giám sát
+      // vẫn chạy và bộ đếm tiếp tục tăng ("Lần thứ 9/3", "Lần thứ 12/3"...)
+      // trong khi server đã bỏ qua im lặng mọi vi phạm sau đó.
+      setLocked(true)
+      clearWarning()
       submitExam('AUTO_VIOLATION')
     },
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -94,7 +137,8 @@ export default function ExamRoom() {
 
   // --- 7 cơ chế khoá an toàn, tất cả đều bật/tắt theo policy từ server ---
   // Chỉ kích hoạt SAU khi thí sinh bấm "Bắt đầu thi" — trước đó chưa thi.
-  const inProgress = Boolean(state) && started
+  // Và DỪNG khi phiên đã bị thu bài (`locked`).
+  const inProgress = Boolean(state) && started && !locked
 
   // Mức 2: cảnh báo đếm ngược yêu cầu quay lại (SRS 5.6).
   // Đặt TRƯỚC các hook khác vì useFullscreenLock / useVisibilityMonitor
@@ -107,6 +151,17 @@ export default function ExamRoom() {
   // bài hay không (client không được tự quyết, xem skills.md Quy tắc #4.3).
   const [strikes, setStrikes] = useState({ TAB_SWITCH: 0, FULLSCREEN_EXIT: 0 })
   const lastIncidentRef = useRef(0)
+  // handleIncident được useCallback theo [logViolation, triggerWarning]; nếu đọc
+  // `locked` trực tiếp thì phải thêm nó vào deps. Dùng ref cho gọn và để
+  // handleIncident không bị tạo lại mỗi lần khoá phiên.
+  const lockedRef = useRef(locked)
+  lockedRef.current = locked
+  // Đọc đồng bộ bộ đếm hiện tại trong handleIncident (state thì bất đồng bộ).
+  const strikesRef = useRef(strikes)
+  strikesRef.current = strikes
+  const maxViolationsRef = useRef(0)
+  maxViolationsRef.current =
+    (policy?.max_tab_switch || 0) + (policy?.max_fullscreen_exit || 0)
 
   /**
    * Gộp mọi sự kiện rời khỏi màn thi về MỘT chỗ.
@@ -117,10 +172,25 @@ export default function ExamRoom() {
    */
   const handleIncident = useCallback(
     (type, source) => {
+      // Phiên đã thu bài -> không đếm nữa. Server cũng vậy (record_violation bỏ
+      // qua khi status != IN_PROGRESS). Nếu không chặn ở đây, thí sinh thấy
+      // bộ đếm nhảy lên vô hạn ("Lần thứ 15/3") trong khi phía giám sát đứng yên.
+      if (lockedRef.current) return
+
       // Chống bắn trùng: blur + visibilitychange, hoặc fullscreenchange lặp.
       const now = Date.now()
       if (now - lastIncidentRef.current < 1500) return
       lastIncidentRef.current = now
+
+      // Chặn Ở NGƯỠNG. Server cũng vậy: `record_violation` từ chối ghi khi
+      // status đã là SUBMITTED, nên tổng vi phạm không bao giờ vượt quá
+      // max_tab_switch + max_fullscreen_exit.
+      //
+      // Nếu không chặn, thí sinh thấy bộ đếm nhảy vô hạn ("23/8") trong khi
+      // phía giám sát đứng yên ở 8 — hai bên không khớp, và nhìn rất vô lý.
+      const cur = strikesRef.current
+      const total = (cur.TAB_SWITCH || 0) + (cur.FULLSCREEN_EXIT || 0)
+      if (total >= maxViolationsRef.current) return
 
       logViolation?.(type, { source: source || 'unknown' })
       setStrikes((prev) => ({ ...prev, [type]: (prev[type] || 0) + 1 }))
@@ -212,10 +282,15 @@ export default function ExamRoom() {
   const questions = state?.questions || []
   const current = questions[currentIndex]
 
-  // Ngưỡng và số lần hiện tại của loại vi phạm đang cảnh báo
-  const currentStrike = warning ? strikes[warning] || 0 : 0
-  const currentLimit =
-    warning === 'FULLSCREEN_EXIT' ? policy.max_fullscreen_exit : policy.max_tab_switch
+  // Ngưỡng vi phạm của phiên.
+  //
+  // Server KHÔNG ép riêng từng loại — `AnticheatService.resolve_max_violations`
+  // cộng max_tab_switch + max_fullscreen_exit rồi so với TỔNG số vi phạm.
+  // Nên hiển thị cũng phải theo tổng. Nếu so "số lần chuyển tab" với
+  // max_tab_switch sẽ ra những thứ vô nghĩa kiểu "Lần thứ 7/5".
+  const totalStrikes = (strikes.TAB_SWITCH || 0) + (strikes.FULLSCREEN_EXIT || 0)
+  const maxViolations =
+    (policy.max_tab_switch || 0) + (policy.max_fullscreen_exit || 0)
 
   const answeredIds = useMemo(
     () =>
@@ -369,11 +444,10 @@ export default function ExamRoom() {
                   Khi bấm <strong>Bắt đầu thi</strong>, trình duyệt sẽ chuyển sang chế
                   độ toàn màn hình. Bạn có thể thoát toàn màn hình bằng phím{' '}
                   <kbd className="font-mono">Esc</kbd>, nhưng mỗi lần thoát sẽ bị ghi
-                  nhận. Tối đa{' '}
-                  <strong className="font-mono">{policy.max_fullscreen_exit}</strong> lần
-                  thoát và{' '}
-                  <strong className="font-mono">{policy.max_tab_switch}</strong> lần rời
-                  tab; vượt ngưỡng, hệ thống sẽ tự nộp bài.
+                  nhận. Tổng số lần vi phạm được phép là{' '}
+                  <strong className="font-mono">{maxViolations}</strong> (
+                  {policy.max_tab_switch} lần rời tab và {policy.max_fullscreen_exit} lần
+                  thoát toàn màn hình); vượt ngưỡng, hệ thống sẽ tự nộp bài.
                 </Alert>
               )}
 
@@ -441,33 +515,7 @@ export default function ExamRoom() {
     }))
   }
 
-  const submitExam = async (submitType = 'MANUAL') => {
-    if (!state?.session_token) return
-    setSubmitting(true)
-    try {
-      await apiClient.post('/exam-sessions/submit', {
-        submit_type: submitType,
-        session_token: state.session_token,
-      })
-      navigate('/exam/results')
-    } catch (err) {
-      const status = err?.response?.status
-      const message = extractErrorMessage(err, 'Không nộp được bài.')
 
-      // 404 = phiên thi không còn tồn tại trên máy chủ (GV xoá ca, ca bị huỷ,
-      // hoặc dữ liệu được dọn). Giữ người dùng lại trong phòng là vô nghĩa —
-      // mọi thao tác sau đó cũng sẽ hỏng — nên dẫn họ ra khỏi phòng kèm lý do.
-      if (status === 404 || status === 403) {
-        setServerNotice(message)
-        setTimeout(() => navigate('/exam/join', { state: { notice: message } }), 2500)
-        return
-      }
-
-      setServerNotice(message)
-    } finally {
-      setSubmitting(false)
-    }
-  }
 
   const securityChips = [
     { key: 'require_fullscreen', icon: 'desktop_windows' },
@@ -723,8 +771,9 @@ export default function ExamRoom() {
             <div className="mt-3 inline-flex items-center gap-2 px-3 py-2 rounded-lg bg-error-50 border border-error/30">
               <Icon name="warning" size={18} className="text-error" />
               <span className="text-sm text-slate-700">
-                Lần thứ <strong className="font-mono text-error">{currentStrike}</strong> /{' '}
-                <strong className="font-mono">{currentLimit}</strong>
+                Đã ghi nhận{' '}
+                <strong className="font-mono text-error">{totalStrikes}</strong> /{' '}
+                <strong className="font-mono">{maxViolations}</strong> lần vi phạm
               </span>
             </div>
           </div>
@@ -743,9 +792,9 @@ export default function ExamRoom() {
         </div>
 
         <p className="text-xs text-slate-500 mt-4 text-center">
-          {currentStrike >= currentLimit
+          {totalStrikes >= maxViolations
             ? 'Bạn đã vượt ngưỡng cho phép — hệ thống sẽ tự động nộp bài.'
-            : `Còn ${currentLimit - currentStrike} lần nữa trước khi bị ghi nhận vượt ngưỡng và tự động nộp bài.`}
+            : `Còn ${maxViolations - totalStrikes} lần nữa trước khi bị ghi nhận vượt ngưỡng và tự động nộp bài.`}
         </p>
       </Modal>
 

@@ -2,7 +2,9 @@ from app.sockets.socket_server import sio
 from app.sockets.exam_namespace import active_sockets
 from app.core.database import SessionLocal
 from app.models.exam_session import ExamSession
+from app.models.exam_schedule import ExamSchedule
 from app.services.exam_session_service import ExamSessionService
+from app.services.exam_security_service import ExamSecurityService
 from app.schemas.exam_session_schema import SubmitExamRequest
 
 def register_monitor_socket_handlers():
@@ -15,15 +17,41 @@ def register_monitor_socket_handlers():
 
         monitor_room = f"monitor_{room_code.upper()}"
         await sio.enter_room(sid, monitor_room)
-        
+
         # Return currently active students in this room
         active_list = [
             v for v in active_sockets.values() if v.get("room_code") == room_code.upper()
         ]
+
+        # Gửi kèm NGƯỠNG vi phạm để giáo viên thấy "7/5" thay vì con số trần.
+        # Không có ngưỡng thì giáo viên không phân biệt được "đang ở mức 3" với
+        # "đã vượt mức rồi mà bị hệ thống tự nộp bài".
+        limits = {}
+        db = SessionLocal()
+        try:
+            schedule = (
+                db.query(ExamSchedule)
+                .filter(ExamSchedule.room_code == room_code.upper())
+                .first()
+            )
+            if schedule:
+                policy = ExamSecurityService.resolve_policy(db, schedule.exam_id)
+                limits = {
+                    "max_tab_switch": policy.max_tab_switch,
+                    "max_fullscreen_exit": policy.max_fullscreen_exit,
+                    "max_violations": policy.max_tab_switch + policy.max_fullscreen_exit,
+                }
+        except Exception:
+            # Không được để lỗi ngưỡng làm hỏng luôn việc vào phòng giám sát.
+            limits = {}
+        finally:
+            db.close()
+
         return {
             "status": "success",
             "monitor_room": monitor_room,
-            "active_students": active_list
+            "active_students": active_list,
+            "limits": limits
         }
 
     @sio.event
@@ -61,7 +89,7 @@ def register_monitor_socket_handlers():
                     "session_id": session_id,
                     "student_name": student_name,
                     "reason": reason
-                }, room=f"monitor_{room_code}")
+                }, room=f"monitor_{room_code.upper()}")
 
             return {"status": "success"}
         finally:
