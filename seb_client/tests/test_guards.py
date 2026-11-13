@@ -175,3 +175,118 @@ def test_base_guard_requires_violation_type(qapp):
     guard = Broken(_DummyWindow(), reporter=lambda t, d: None)
     with pytest.raises(ValueError):
         guard.report()
+
+# ------------------------------------------------- policy từ file .seb
+
+class _Policy:
+    """Policy tối giản, chỉ cần các cờ KeyboardGuard/KioskGuard đọc."""
+
+    def __init__(self, **overrides):
+        self.allow_print = False
+        self.allow_copy_paste = False
+        self.allow_right_mouse = False
+        self.allow_devtools = False
+        self.block_alt_tab = True
+        self.allow_quit = True
+        self.requires_quit_password = False
+        for key, value in overrides.items():
+            setattr(self, key, value)
+
+@pytest.mark.parametrize(
+    "overrides,expect_print,expect_copy,expect_devtools,expect_alt_tab",
+    [
+        ({}, True, True, True, True),
+        ({"allow_print": True}, False, True, True, True),
+        ({"allow_copy_paste": True}, True, False, True, True),
+        ({"allow_devtools": True}, True, True, False, True),
+        ({"block_alt_tab": False}, True, True, True, False),
+    ],
+)
+def test_keyboard_guard_sequence_selection(
+    qapp, overrides, expect_print, expect_copy, expect_devtools, expect_alt_tab
+):
+    """Chọn tổ hợp phím cần đăng ký theo policy.
+
+    Test thẳng hàm chọn thay vì `install()`: `install()` tạo `QShortcut` cần
+    parent là QObject thật, còn logic cần khoá lại là *tổ hợp nào bị chặn*.
+    """
+    policy = _Policy(**overrides)
+    guard = KeyboardGuard(_DummyWindow(), policy=policy)
+
+    content = guard._content_sequences()
+    devtools = guard._devtools_sequences()
+
+    assert ("Ctrl+P" in content) is expect_print
+    assert ("Ctrl+C" in content) is expect_copy
+    assert bool(devtools) is expect_devtools
+
+    from PySide6.QtCore import Qt
+
+    # Alt+Tab được quyết định trong eventFilter, không phải danh sách shortcut.
+    blocked = guard.eventFilter(None, _Key(Qt.Key_Tab, Qt.AltModifier))
+    assert blocked is expect_alt_tab
+
+def test_keyboard_guard_allows_print_when_policy_permits(qapp, reported):
+    from PySide6.QtCore import Qt
+
+    guard = KeyboardGuard(
+        _DummyWindow(), reporter=lambda t, d: reported.append(t), policy=_Policy(allow_print=True)
+    )
+    assert guard.eventFilter(None, _Key(Qt.Key_P, Qt.ControlModifier)) is False
+    # Nhưng Ctrl+C vẫn phải bị chặn vì allow_copy_paste vẫn False.
+    assert guard.eventFilter(None, _Key(Qt.Key_C, Qt.ControlModifier)) is True
+    assert reported == [VIOLATION_COPY_PASTE_ATTEMPT]
+
+def test_keyboard_guard_allows_copy_when_policy_permits(qapp, reported):
+    from PySide6.QtCore import Qt
+
+    guard = KeyboardGuard(
+        _DummyWindow(),
+        reporter=lambda t, d: reported.append(t),
+        policy=_Policy(allow_copy_paste=True),
+    )
+    for key in (Qt.Key_C, Qt.Key_V, Qt.Key_X, Qt.Key_A):
+        assert guard.eventFilter(None, _Key(key, Qt.ControlModifier)) is False
+    assert reported == []
+
+def test_keyboard_guard_allows_devtools_when_policy_permits(qapp, reported):
+    from PySide6.QtCore import Qt
+
+    guard = KeyboardGuard(
+        _DummyWindow(),
+        reporter=lambda t, d: reported.append(t),
+        policy=_Policy(allow_devtools=True),
+    )
+    assert guard.eventFilter(None, _Key(Qt.Key_F12, Qt.NoModifier)) is False
+    assert reported == []
+
+def test_keyboard_guard_allows_alt_tab_when_policy_permits(qapp, reported):
+    from PySide6.QtCore import Qt
+
+    guard = KeyboardGuard(
+        _DummyWindow(),
+        reporter=lambda t, d: reported.append(t),
+        policy=_Policy(block_alt_tab=False),
+    )
+    assert guard.eventFilter(None, _Key(Qt.Key_Tab, Qt.AltModifier)) is False
+    assert reported == []
+
+def test_kiosk_guard_allows_right_click_when_policy_permits(qapp, reported):
+    from PySide6.QtCore import QEvent, Qt
+    from PySide6.QtWidgets import QWidget
+
+    from sebclient.guards.kiosk_guard import KioskGuard
+
+    window = _DummyWindow(view=QWidget())
+    window.setContextMenuPolicy = lambda _policy: None
+    window.installEventFilter = lambda _filter: None
+    window.showFullScreen = lambda: None
+    guard = KioskGuard(
+        window,
+        reporter=lambda t, d: reported.append(t),
+        policy=_Policy(allow_right_mouse=True),
+    )
+
+    event = QEvent(QEvent.ContextMenu)
+    assert guard.eventFilter(None, event) is False
+    assert reported == []

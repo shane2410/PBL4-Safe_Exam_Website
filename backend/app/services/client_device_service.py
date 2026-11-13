@@ -74,6 +74,21 @@ class ClientDeviceService:
         ).first()
 
         if existing is not None:
+            # Khoá đã bị ADMIN thu hồi: TỪ CHỐI đăng ký lại.
+            #
+            # Trước đây hàm này tự đặt `revoked_at = None` rồi cho qua, nên
+            # "thu hồi thiết bị" hoàn toàn vô tác dụng: chỉ cần client chạy
+            # lại (nó luôn register trước khi attest) là thiết bị tự mở khoá.
+            #
+            # Mở khoá phải do ADMIN làm qua POST /admin/devices/{device_id}/revoke
+            # với `revoke=false`, và được ghi audit log.
+            if existing.revoked_at is not None:
+                logger.warning(
+                    "Từ chối đăng ký lại thiết bị %s của user=%s: đã bị thu hồi",
+                    device_id, user.username,
+                )
+                raise DeviceKeyError("DEVICE_REVOKED")
+
             # Gọi lại cùng khoá: cập nhật thông tin, không tạo bản ghi mới.
             existing.last_seen_at = datetime.now(timezone.utc)
             existing.label = payload.label or existing.label
@@ -87,14 +102,6 @@ class ClientDeviceService:
                 existing.unsupported = ";".join(
                     f"{k}:{v}" for k, v in payload.unsupported.items()
                 )[:255]
-            if existing.revoked_at is not None:
-                # Khoá bị thu hồi mà giờ client quay lại dùng: cho phép đăng ký
-                # lại, nhưng ghi lại sự kiện vì đáng ngờ.
-                logger.warning(
-                    "Thiết bị %s của user=%s đã bị thu hồi, đăng ký lại",
-                    device_id, user.username,
-                )
-                existing.revoked_at = None
             db.commit()
             db.refresh(existing)
             logger.info("Thiết bị %s đã tồn tại (user=%s)", device_id, user.username)

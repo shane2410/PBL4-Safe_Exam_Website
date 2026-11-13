@@ -1,16 +1,27 @@
+import logging
+
 from app.sockets.socket_server import sio
 from app.sockets.exam_namespace import active_sockets
+from app.sockets.socket_auth import identity_of
 from app.core.database import SessionLocal
 from app.models.exam_session import ExamSession
 from app.models.exam_schedule import ExamSchedule
 from app.services.exam_session_service import ExamSessionService
 from app.services.exam_security_service import ExamSecurityService
+from app.services.anticheat_service import AnticheatService
 from app.schemas.exam_session_schema import SubmitExamRequest
+
+logger = logging.getLogger(__name__)
 
 def register_monitor_socket_handlers():
     @sio.event
     async def join_monitor_room(sid, data):
         """Teacher joins live monitor room for a given exam schedule."""
+        identity = identity_of(sid)
+        if identity is None or identity.get("role") not in ("ADMIN", "TEACHER"):
+            logger.warning("Từ chối join_monitor_room từ socket %s (không phải giám thị)", sid)
+            return {"status": "error", "message": "Không có quyền giám sát phòng thi"}
+
         room_code = data.get("room_code")
         if not room_code:
             return {"status": "error", "message": "Missing room_code"}
@@ -39,7 +50,11 @@ def register_monitor_socket_handlers():
                 limits = {
                     "max_tab_switch": policy.max_tab_switch,
                     "max_fullscreen_exit": policy.max_fullscreen_exit,
-                    "max_violations": policy.max_tab_switch + policy.max_fullscreen_exit,
+                    # Cùng một nguồn với AnticheatService để dashboard không
+                    # hiển thị ngưỡng khác ngưỡng server thực sự áp dụng.
+                    "max_violations": AnticheatService.resolve_max_violations_for_exam(
+                        db, schedule.exam
+                    ),
                 }
         except Exception:
             # Không được để lỗi ngưỡng làm hỏng luôn việc vào phòng giám sát.
@@ -57,6 +72,11 @@ def register_monitor_socket_handlers():
     @sio.event
     async def teacher_force_submit(sid, data):
         """Teacher manually forces submit for a cheating student."""
+        identity = identity_of(sid)
+        if identity is None or identity.get("role") not in ("ADMIN", "TEACHER"):
+            logger.warning("Từ chối teacher_force_submit từ socket %s (không phải giám thị)", sid)
+            return {"status": "error", "message": "Không có quyền thu bài"}
+
         session_id = data.get("session_id")
         reason = data.get("reason", "Giám thị cưỡng chế thu bài do phát hiện gian lận")
         

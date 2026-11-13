@@ -49,9 +49,12 @@ BLOCKED_ACTIONS: dict[QWebEnginePage.WebAction, str] = {
 class GuardedWebEnginePage(QWebEnginePage):
     """Page chặn action nguy hiểm và báo vi phạm qua callback."""
 
-    def __init__(self, profile, parent=None, reporter: ActionReporter | None = None):
+    def __init__(self, profile, parent=None, reporter: ActionReporter | None = None, policy=None):
         super().__init__(profile, parent)
         self._reporter = reporter
+        # Policy tuỳ chọn (từ file `.seb`). Không có policy = chặn tối đa,
+        # giữ nguyên hành vi của chế độ thi.
+        self._policy = policy
 
     def set_reporter(self, reporter: ActionReporter | None) -> None:
         self._reporter = reporter
@@ -59,6 +62,9 @@ class GuardedWebEnginePage(QWebEnginePage):
     def triggerAction(self, action, checked=False):  # noqa: N802 - chữ ký bắt buộc
         violation_type = BLOCKED_ACTIONS.get(action)
         if violation_type is not None:
+            if self._policy_allows(action):
+                super().triggerAction(action, checked)
+                return
             logger.info("Chan web action %s (%s)", action.name, violation_type)
             if self._reporter:
                 self._reporter(
@@ -67,3 +73,18 @@ class GuardedWebEnginePage(QWebEnginePage):
                 )
             return
         super().triggerAction(action, checked)
+
+    def _policy_allows(self, action) -> bool:
+        """Policy `.seb` có nới lỏng action này không."""
+        policy = self._policy
+        if policy is None:
+            return False
+        w = QWebEnginePage.WebAction
+        if action in (w.Copy, w.Cut, w.Paste):
+            return bool(policy.allow_copy_paste)
+        if action in (w.OpenLinkInNewWindow, w.OpenLinkInNewBackgroundTab):
+            return not policy.block_popups
+        if action in (w.InspectElement, w.ViewSource):
+            return bool(policy.allow_devtools)
+        # Lưu trang / tải media không có khoá riêng trong policy => luôn chặn.
+        return False

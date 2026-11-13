@@ -3,6 +3,11 @@ from datetime import datetime, timezone
 from typing import Dict, Any
 from sqlalchemy.orm import joinedload
 from app.sockets.socket_server import sio
+from app.sockets.socket_auth import (
+    authenticate_socket,
+    drop_identity,
+    identity_of,
+)
 from app.core.database import SessionLocal
 from app.models.exam_session import ExamSession
 from app.models.exam_schedule import ExamSchedule
@@ -22,11 +27,20 @@ active_sockets: Dict[str, Dict[str, Any]] = {}
 def register_exam_socket_handlers():
     @sio.event
     async def connect(sid, environ, auth):
-        pass
+        # Bắt buộc JWT: không có token hợp lệ thì từ chối ngay ở tầng handshake,
+        # thay vì để kết nối ẩn danh rồi mới kiểm tra ở từng sự kiện.
+        identity = authenticate_socket(sid, auth, environ)
+        if identity is None:
+            logger.warning("Từ chối socket %s: thiếu hoặc sai access token", sid)
+            raise ConnectionRefusedError("unauthorized")
 
     @sio.event
     async def join_exam_room(sid, data):
         """Thí sinh vào phòng thi qua socket."""
+        identity = identity_of(sid)
+        if identity is None:
+            return {"status": "error", "message": "Unauthorized"}
+
         room_code = data.get("room_code")
         session_token = data.get("session_token")
 
@@ -38,6 +52,16 @@ def register_exam_socket_handlers():
             session = db.query(ExamSession).filter(ExamSession.session_token == session_token).first()
             if not session or session.status == "SUBMITTED":
                 return {"status": "error", "message": "Invalid or finished session"}
+
+            # Chỉ chủ phiên (hoặc ADMIN/TEACHER) mới được gắn socket vào phiên này.
+            # Trước đây chỉ cần biết session_token là gắn được, nên một thí sinh
+            # biết token của bạn cùng phòng có thể gửi vi phạm thay người đó.
+            if identity["role"] == "STUDENT" and session.student_id != identity["user_id"]:
+                logger.warning(
+                    "Socket %s (user=%s) cố vào phiên của user=%s",
+                    sid, identity["user_id"], session.student_id,
+                )
+                return {"status": "error", "message": "Không có quyền vào phiên thi này"}
 
             # --- Phát hiện đăng nhập trùng ---
             # Cùng một phiên thi mà có 2 socket đang mở là dấu hiệu thí sinh
@@ -240,6 +264,7 @@ def register_exam_socket_handlers():
     @sio.event
     async def disconnect(sid):
         """Handle student socket disconnect."""
+        drop_identity(sid)
         if sid in active_sockets:
             sock_info = active_sockets.pop(sid)
             session_id = sock_info["session_id"]

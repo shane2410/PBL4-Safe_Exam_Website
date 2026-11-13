@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
+import { useCallback, useEffect, useMemo, useRef } from 'react'
 import { getSocket } from '../../../services/socketClient'
 import policyService from '../../../services/policyService'
 
@@ -13,9 +13,19 @@ import policyService from '../../../services/policyService'
  * @param {Function} onForceSubmit - Server yêu cầu khoá phiên và nộp bài
  */
 export function useSecurityPolicy(examState, onForceSubmit) {
-  const [policy, setPolicy] = useState(policyService.normalize(examState?.security_policy))
-  const [requireSafeBrowser] = useState(Boolean(examState?.require_safe_browser))
-  const [restrictedMode] = useState(Boolean(examState?.restricted_mode))
+  // KHÔNG dùng useState cho các giá trị phụ thuộc `examState`.
+  //
+  // Hook này chạy lần đầu khi ExamRoom còn đang join (examState === null).
+  // `useState(initial)` chỉ dùng initial ở lần render ĐẦU TIÊN, nên trước đây
+  // cả policy lẫn 2 cờ bị kẹt vĩnh viễn ở giá trị mặc định: cấu hình riêng
+  // của đề bị phớt lờ và PolicyGate ("chỉ cho phép SEB") không bao giờ hiện.
+  // useMemo/giá trị dẫn xuất thì luôn theo kịp examState mới.
+  const policy = useMemo(
+    () => policyService.normalize(examState?.security_policy),
+    [examState?.security_policy],
+  )
+  const requireSafeBrowser = Boolean(examState?.require_safe_browser)
+  const restrictedMode = Boolean(examState?.restricted_mode)
 
   const socketRef = useRef(null)
   const forceSubmitRef = useRef(onForceSubmit)
@@ -101,7 +111,6 @@ export function useSecurityPolicy(examState, onForceSubmit) {
 
   return {
     policy,
-    setPolicy,
     requireSafeBrowser,
     restrictedMode,
     logViolation,

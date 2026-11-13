@@ -24,10 +24,18 @@ class KioskGuard(BaseGuard):
     name = "kiosk"
     violation_type = VIOLATION_RIGHT_CLICK_ATTEMPT
 
-    def __init__(self, window, reporter=None, allow_close: bool = False, os_adapter=None):
+    def __init__(
+        self,
+        window,
+        reporter=None,
+        allow_close: bool = False,
+        os_adapter=None,
+        policy=None,
+    ):
         super().__init__(window, reporter)
         self._allow_close = allow_close
         self._os = os_adapter
+        self._policy = policy
         self._ever_fullscreen = False
         self._os_kiosk_active = False
 
@@ -37,7 +45,8 @@ class KioskGuard(BaseGuard):
 
     def install(self) -> None:
         window = self._window
-        window.setContextMenuPolicy(Qt.NoContextMenu)
+        if self._policy is None or not self._policy.allow_right_mouse:
+            window.setContextMenuPolicy(Qt.NoContextMenu)
         window.installEventFilter(self)
         self._enter_fullscreen()
         self._enter_os_kiosk()
@@ -90,15 +99,24 @@ class KioskGuard(BaseGuard):
                 self._ever_fullscreen = True
 
         elif event.type() == QEvent.ContextMenu:
+            if self._policy is not None and self._policy.allow_right_mouse:
+                return False
             self.report({"detected": "context_menu"}, dedupe=False)
             return True
 
         elif event.type() == QEvent.MouseButtonPress:
+            if self._policy is not None and self._policy.allow_right_mouse:
+                return False
             if event.button() == Qt.RightButton:
                 self.report({"detected": "right_click"}, dedupe=False)
                 return True
 
         elif event.type() == QEvent.Close and not self._allow_close:
+            # File cấu hình `.seb` có thể cho phép thoát thẳng. Chỉ chặn khi
+            # cấu hình yêu cầu — chặn vô điều kiện sẽ khiến máy lỗi không có
+            # cách thoát, đúng vấn đề `allowQuit` của SEB sinh ra để tránh.
+            if self._policy is not None and self._policy.allow_quit and not self._policy.requires_quit_password:
+                return False
             logger.warning("Thuong cho dong cua so thi")
             event.ignore()
             self.report({"detected": "close_attempt"})

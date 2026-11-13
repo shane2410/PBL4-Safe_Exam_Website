@@ -1,27 +1,39 @@
 import logging
 from typing import List, Optional
 from fastapi import HTTPException, status
-from sqlalchemy.orm import Session, joinedload
+from sqlalchemy.orm import Session, joinedload, selectinload
 from app.models.exam import Exam
 from app.models.exam_question import ExamQuestion
 from app.models.exam_schedule import ExamSchedule
 from app.models.subject import Subject
 from app.schemas.exam_schema import (
     ExamCreate, ExamUpdate, ExamResponse, ExamDetailResponse,
-    ExamScheduleCreate, ExamScheduleUpdate, ExamScheduleResponse
+    ExamQuestionResponse, ExamScheduleCreate, ExamScheduleUpdate, ExamScheduleResponse
 )
 from app.services.exam_security_service import ExamSecurityService
+from app.services.settings_service import SettingsService
 
 logger = logging.getLogger(__name__)
 
 class ExamService:
     @staticmethod
     def get_exams(db: Session, subject_id: Optional[int] = None) -> List[ExamResponse]:
-        query = db.query(Exam)
+        # joinedload cả 2 quan hệ mà ExamResponse chạm tới:
+        #   * exam_questions -> dùng cho `question_count`
+        #   * subject        -> ExamResponse.subject
+        # Trước đây không có joinedload nên với N đề, SQLAlchemy bắn thêm 2N
+        # câu SELECT (N cho số câu hỏi + N cho môn học) — trang danh sách đề
+        # chậm dần rõ rệt khi ngân hàng đề lớn lên.
+        # Dùng selectinload cho exam_questions để tránh nhân bản dòng khi
+        # joinedload kết hợp với collection (mỗi đề N câu sẽ lặp N lần).
+        query = db.query(Exam).options(
+            selectinload(Exam.exam_questions),
+            joinedload(Exam.subject),
+        )
         if subject_id:
             query = query.filter(Exam.subject_id == subject_id)
         exams = query.order_by(Exam.id.desc()).all()
-        
+
         result = []
         for e in exams:
             item = ExamResponse.model_validate(e)
@@ -38,9 +50,22 @@ class ExamService:
         if not exam:
             raise HTTPException(status_code=404, detail="Không tìm thấy đề thi")
 
-        res = ExamDetailResponse.model_validate(exam)
+        # `Exam.security_config` là ORM row (cột `config` dạng JSON), không phải
+        # schema Pydantic. Validate thẳng ORM object vào ExamDetailResponse sẽ
+        # ném ValidationError ngay khi đề ĐÃ có cấu hình riêng — tức là giáo
+        # viên càng chỉnh cấu hình thì trang sửa đề càng chắc chắn hỏng.
+        # Vì vậy dựng response từ ExamResponse (không có field này) rồi gán
+        # policy ĐÃ RESOLVE vào.
+        base = ExamResponse.model_validate(exam)
+        res = ExamDetailResponse(
+            **base.model_dump(),
+            exam_questions=[
+                ExamQuestionResponse.model_validate(eq) for eq in exam.exam_questions
+            ],
+            security_config=ExamSecurityService.resolve_policy(db, exam_id),
+            require_safe_browser_global=SettingsService.get_require_safe_browser_global(db),
+        )
         res.question_count = len(exam.exam_questions)
-        res.security_config = ExamSecurityService.resolve_policy(db, exam_id)
         return res
 
     @staticmethod

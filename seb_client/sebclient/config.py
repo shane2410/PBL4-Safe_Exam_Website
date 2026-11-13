@@ -8,6 +8,7 @@ xem `api/client.py`.
 from __future__ import annotations
 
 import os
+import sys
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -15,7 +16,20 @@ from dotenv import load_dotenv
 
 from .constants import DEFAULT_BACKEND_URL, DEFAULT_EXAM_ORIGIN
 
-BASE_DIR = Path(__file__).resolve().parent.parent
+def _app_dir() -> Path:
+    """Thư mục chứa dữ liệu ghi được của ứng dụng.
+
+    Khi chạy từ mã nguồn: thư mục `seb_client/`.
+    Khi chạy bản đóng gói (PyInstaller): thư mục chứa file thực thi, KHÔNG phải
+    `sys._MEIPASS` — đó là thư mục giải nén tạm, bị xoá sau khi thoát, nên log
+    và khoá thiết bị ghi vào đó sẽ mất. `.env` cũng phải nằm cạnh file chạy để
+    kỹ thuật viên sửa được mà không cần build lại.
+    """
+    if getattr(sys, "frozen", False):
+        return Path(sys.executable).resolve().parent
+    return Path(__file__).resolve().parent.parent
+
+BASE_DIR = _app_dir()
 
 # Chỉ override khi chưa có biến thật — không đè giá trị người dùng đã export.
 load_dotenv(BASE_DIR / ".env", override=False)

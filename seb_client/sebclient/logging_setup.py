@@ -26,9 +26,13 @@ def setup_logging(log_dir: Path, level: str = "INFO") -> Path:
 
     formatter = logging.Formatter(LOG_FORMAT, datefmt=DATE_FORMAT)
 
-    console = logging.StreamHandler(sys.stderr)
-    console.setFormatter(formatter)
-    root.addHandler(console)
+    # Bản đóng gói không có console: `sys.stderr` là None, tạo StreamHandler
+    # với nó sẽ ném lỗi ngay khi ghi log đầu tiên. Chỉ gắn console khi thật sự
+    # có luồng lỗi — bản chạy phòng thi vẫn còn file log để tra cứu.
+    if sys.stderr is not None:
+        console = logging.StreamHandler(sys.stderr)
+        console.setFormatter(formatter)
+        root.addHandler(console)
 
     file_handler = logging.handlers.TimedRotatingFileHandler(
         log_file, when="midnight", backupCount=14, encoding="utf-8"

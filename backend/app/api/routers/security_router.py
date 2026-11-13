@@ -3,6 +3,7 @@ from fastapi import APIRouter, Depends, HTTPException, Query, status
 from sqlalchemy.orm import Session
 from app.core.database import get_db
 from app.dependencies.auth import get_current_user, require_role
+from app.dependencies.ownership import ensure_exam_owner
 from app.models.exam import Exam
 from app.models.user import User
 from app.schemas.settings_schema import ExamSecurityConfig
@@ -36,6 +37,10 @@ def update_security_policy(
     exam = db.query(Exam).filter(Exam.id == exam_id).first()
     if not exam:
         raise HTTPException(status_code=404, detail="Không tìm thấy đề thi")
+
+    # Chỉ chủ sở hữu đề (hoặc ADMIN) mới được đổi cấu hình khoá an toàn: đây là
+    # bề mặt ảnh hưởng trực tiếp tới kỳ thi của thí sinh.
+    ensure_exam_owner(db, exam, current_user)
 
     try:
         return ExamSecurityService.save_config(db, exam_id, payload)

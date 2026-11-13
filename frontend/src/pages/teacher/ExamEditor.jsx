@@ -52,17 +52,24 @@ export default function ExamEditor() {
 
     const load = async () => {
       try {
-        const [examRes, policyRes, settingsRes, subjectsRes] = await Promise.all([
+        // Lưu ý về shape dữ liệu:
+        //   - apiClient.get(...) trả về axios response -> phải dùng `.data`
+        //   - policyService.* đã bóc sẵn `data` bên trong -> dùng trực tiếp
+        // Trước đây code dùng `policyRes.data` và `settingsRes.data` cho cả hai
+        // loại, nên policy luôn rơi về mặc định và `settingsRes.data` là
+        // undefined -> TypeError -> giáo viên không mở được đề nào.
+        const [examRes, policy, subjectsRes] = await Promise.all([
           apiClient.get(`/exams/${examId}`),
           policyService.getExamPolicy(examId),
-          policyService.getSystemSettings(),
           apiClient.get('/questions/subjects'),
         ])
         if (cancelled) return
 
         setExam(examRes.data)
-        setPolicy(policyService.normalize(policyRes.data))
-        setGlobalToggle(Boolean(settingsRes.data.require_safe_browser_global))
+        setPolicy(policyService.normalize(policy))
+        // Cờ hệ thống đi kèm trong detail đề (chỉ đọc), nên TEACHER không cần
+        // gọi /admin/settings — endpoint đó chỉ dành cho ADMIN và sẽ trả 403.
+        setGlobalToggle(Boolean(examRes.data.require_safe_browser_global))
         setSubjects(subjectsRes.data)
 
         // Nạp danh sách câu đã gán vào đề (ExamDetailResponse.exam_questions)

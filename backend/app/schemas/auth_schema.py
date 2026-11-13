@@ -11,7 +11,8 @@ class RegisterRequest(BaseModel):
     password: str = Field(..., min_length=6)
     full_name: str = Field(..., min_length=2, max_length=100)
     email: EmailStr
-    role_code: str = Field(default="STUDENT")  # STUDENT | TEACHER
+    # KHÔNG có `role_code`: đây là endpoint đăng ký CÔNG KHAI, luôn tạo STUDENT.
+    # Tạo ADMIN/TEACHER phải qua POST /api/admin/users (yêu cầu quyền ADMIN).
     student_code: Optional[str] = None
 
 class RoleResponse(BaseModel):

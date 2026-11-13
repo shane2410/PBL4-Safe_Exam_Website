@@ -33,6 +33,12 @@ class ExamTakingStateResponse(BaseModel):
     security_policy: Optional[ExamSecurityConfig] = None
     require_safe_browser: bool = False
     restricted_mode: bool = False
+    # Bộ đếm vi phạm ĐÃ tích luỹ của phiên. Client dùng để khôi phục thanh
+    # "Lần vi phạm x/y" khi thí sinh F5 hoặc vào lại phòng. Trước đây client
+    # luôn khởi tạo 0 nên sau khi reload, UI hiện "1/8" trong khi server đã
+    # ở 7/8 và có thể tự nộp ngay lần vi phạm kế tiếp.
+    tab_switch_count: int = 0
+    fullscreen_exit_count: int = 0
 
 class SaveAnswerRequest(BaseModel):
     question_id: int

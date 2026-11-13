@@ -54,16 +54,16 @@ class AuthService:
                 detail="Email này đã được sử dụng"
             )
         
-        # Strict role validation
-        target_role_code = reg_data.role_code.upper() if reg_data.role_code else "STUDENT"
-        role = db.query(Role).filter(Role.code == target_role_code).first()
+        # Tự đăng ký CÔNG KHAI luôn tạo tài khoản STUDENT.
+        # KHÔNG đọc `role_code` từ request: trước đây client gửi "ADMIN"/"TEACHER"
+        # là tự tạo được tài khoản quản trị (leo thang đặc quyền). Việc tạo
+        # ADMIN/TEACHER chỉ được phép qua POST /api/admin/users (có require_role).
+        role = db.query(Role).filter(Role.code == "STUDENT").first()
         if not role:
-            role = db.query(Role).filter(Role.code == "STUDENT").first()
-            if not role:
-                raise HTTPException(
-                    status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-                    detail="Cấu hình vai trò người dùng trong hệ thống chưa được khởi tạo"
-                )
+            raise HTTPException(
+                status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                detail="Cấu hình vai trò người dùng trong hệ thống chưa được khởi tạo"
+            )
             
         user = User(
             username=reg_data.username,

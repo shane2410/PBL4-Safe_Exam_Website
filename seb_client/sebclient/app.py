@@ -22,6 +22,23 @@ from .api.client import ApiClient
 
 logger = logging.getLogger(__name__)
 
+# Cách mở file cấu hình `.seb`: double-click trên Windows truyền đường dẫn qua
+# argv. Trên Linux/macOS cũng vậy khi file được liên kết với binary này.
+CONFIG_FILE_SUFFIXES = (".seb", ".seb2")
+
+
+def _config_file_from_argv(argv: list[str]) -> str | None:
+    """Lấy đường dẫn file `.seb` từ argv nếu có.
+
+    Bỏ qua argv[0]. Không dùng argparse: chỉ cần một đối số tuỳ chọn, và một
+    đối số lạ không nên làm chương trình thoát với lỗi khó hiểu — bản chạy
+    không có đối số phải luôn dùng chế độ thi có backend như trước.
+    """
+    for arg in argv[1:]:
+        if arg.lower().endswith(CONFIG_FILE_SUFFIXES):
+            return arg
+    return None
+
 
 class SebClientApp:
     """Giữ vòng đời các cửa sổ và tài nguyên dùng chung."""
@@ -93,24 +110,82 @@ class SebClientApp:
                 logger.warning("Loi khi dong cua so: %s", exc)
 
 
-def main() -> int:
-    config = load_config()
-    log_file = setup_logging(config.log_dir, config.log_level)
-    logger.info("=== %s khoi dong ===", "SEB Client")
-    logger.info("Log file: %s", log_file)
-    logger.info("Backend: %s", config.backend_url)
-    logger.info("Exam origin: %s", config.exam_origin)
-    logger.info("Allowed origins: %s", ", ".join(config.allowed_origins))
+def _show_fatal(message: str) -> None:
+    """Báo lỗi khởi động cho người dùng thấy.
 
-    # Năng lực thật của máy này. Phần thiếu sẽ báo lên server và cho giảng viên
-    # thấy — im lặng thiếu là tạo cảm giác an toàn giả (Quy tắc #5).
+    Bản đóng gói chạy ở chế độ windowed (không console): nếu chỉ ghi log rồi
+    `SystemExit` thì người dùng chỉ thấy "bấm không lên". Luôn kèm đường dẫn
+    file log để kỹ thuật viên biết xem ở đâu.
+    """
+    logger.error("%s", message)
+    try:
+        from PySide6.QtWidgets import QApplication, QMessageBox
+
+        if QApplication.instance() is None:
+            QApplication(sys.argv)
+        QMessageBox.critical(None, "SEB Client không khởi động được", message)
+    except Exception as exc:  # noqa: BLE001 - đang báo lỗi, không được nổ thêm
+        logger.warning("Khong hien duoc hop thoai loi: %s", exc)
+
+
+def _install_excepthook() -> None:
+    """Chuyển exception không bắt được vào file log.
+
+    Không console nghĩa là `sys.stderr` là None; excepthook mặc định sẽ cố ghi
+    vào đó và làm mất dấu vết lỗi thay vì để lại trong log.
+    """
+
+    def _hook(exc_type, exc, tb) -> None:
+        logger.critical("Loi khong bat duoc", exc_info=(exc_type, exc, tb))
+
+    sys.excepthook = _hook
+
+
+def _log_capabilities() -> None:
+    """Ghi năng lực thật của máy này vào log.
+
+    Phần thiếu phải báo ra, kể cả ở chế độ mở file cấu hình — im lặng thiếu là
+    tạo cảm giác an toàn giả.
+    """
     from .osint.platform import report as capability_report
 
     caps = capability_report()
     logger.info("Nang luc (%s): %s", caps["platform"], ", ".join(caps["capabilities"]))
-    if caps["unsupported"]:
-        for name, reason in caps["unsupported"].items():
-            logger.warning("KHONG ho tro: %s — %s", name, reason)
+    for name, reason in caps["unsupported"].items():
+        logger.warning("KHONG ho tro: %s — %s", name, reason)
+
+
+def main() -> int:
+    config = load_config()
+    log_file = setup_logging(config.log_dir, config.log_level)
+    _install_excepthook()
+    logger.info("=== %s khoi dong ===", "SEB Client")
+    logger.info("Log file: %s", log_file)
+
+    # Chế độ "mở file cấu hình" phải được nhận diện TRƯỚC khi validate `.env`:
+    # chế độ này không dùng backend, nên một `.env` thiếu khoá không được phép
+    # chặn việc mở file cấu hình.
+    config_file = _config_file_from_argv(sys.argv)
+    if config_file:
+        logger.info("Mo bang file cau hinh: %s", config_file)
+        _log_capabilities()
+        return _run_config_file_mode(config_file, log_file)
+
+    logger.info("Backend: %s", config.backend_url)
+    logger.info("Exam origin: %s", config.exam_origin)
+    logger.info("Allowed origins: %s", ", ".join(config.allowed_origins))
+
+    problems = config.validate()
+    if problems:
+        _show_fatal(
+            "Cấu hình không hợp lệ:\n- "
+            + "\n- ".join(problems)
+            + f"\n\nFile log: {log_file}\n"
+            "Sửa file .env nằm cạnh chương trình rồi chạy lại."
+        )
+        return 1
+
+    _log_capabilities()
     if config.headless:
         logger.warning("Chay o che do HEADLESS — khong phai lan chay that")
 
@@ -133,6 +208,49 @@ def main() -> int:
 
     logger.info("SEB Client ket thuc")
     return 0
+
+
+def _run_config_file_mode(config_file: str, log_file) -> int:
+    """Chế độ "mở file cấu hình": không backend, không login, không socket.
+
+    Chạy trên `app.exec()` thường (không qasync) vì không có việc mạng nào —
+    qasync chỉ cần khi có heartbeat/socket async. Giữ đơn giản giúp lỗi Qt
+    không bị che bởi tầng event loop của asyncio.
+    """
+    from .config_file import ConfigFileError
+    from .ui.policy_browser_window import PolicyBrowserWindow
+
+    try:
+        from .config_file import load_config_file
+
+        policy = load_config_file(config_file)
+    except ConfigFileError as exc:
+        _show_fatal(
+            f"Không mở được file cấu hình:\n{exc}\n\nFile log: {log_file}"
+        )
+        return 1
+
+    qt_app = QApplication.instance() or QApplication(sys.argv)
+    qt_app.setApplicationName("SEB Client")
+    qt_app.setQuitOnLastWindowClosed(True)
+
+    window = PolicyBrowserWindow(policy)
+    window.show()
+    window.start()
+
+    if policy.unsupported:
+        from PySide6.QtWidgets import QMessageBox
+
+        details = "\n".join(f"- {key}: {reason}" for key, reason in policy.unsupported.items())
+        QMessageBox.information(
+            None,
+            "Cấu hình có phần chưa hỗ trợ",
+            "File cấu hình yêu cầu những cơ chế client chưa thực hiện được.\n"
+            "Trang thi vẫn mở, nhưng mức bảo vệ thấp hơn cấu hình ghi:\n\n"
+            f"{details}",
+        )
+
+    return qt_app.exec()
 
 
 if __name__ == "__main__":

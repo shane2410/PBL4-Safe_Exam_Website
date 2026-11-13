@@ -1,4 +1,4 @@
-from fastapi import APIRouter, Depends, status, Query
+from fastapi import APIRouter, Depends, HTTPException, status, Query
 from fastapi.security import OAuth2PasswordRequestForm
 from sqlalchemy.orm import Session
 from app.core.database import get_db
@@ -15,7 +15,7 @@ from app.schemas.client_attestation_schema import (
 )
 from app.services.auth_service import AuthService
 from app.services.attestation_service import AttestationService
-from app.services.client_device_service import ClientDeviceService
+from app.services.client_device_service import ClientDeviceService, DeviceKeyError
 
 router = APIRouter(prefix="/auth", tags=["Authentication"])
 
@@ -35,7 +35,11 @@ def login_swagger(
 
 @router.post("/register", response_model=UserResponse, status_code=status.HTTP_201_CREATED)
 def register(reg_data: RegisterRequest, db: Session = Depends(get_db)):
-    """User registration endpoint."""
+    """Đăng ký công khai — LUÔN tạo tài khoản STUDENT.
+
+    Không nhận `role_code` từ client: tạo ADMIN/TEACHER chỉ được phép qua
+    POST /api/admin/users (yêu cầu quyền ADMIN).
+    """
     return AuthService.register_user(db, reg_data)
 
 @router.get("/me", response_model=UserResponse)
@@ -58,8 +62,20 @@ def register_client_device(
 
     Gọi lại với cùng public key trả `already_registered=true` để client khôi
     phục sau khi thí sinh cài lại máy mà không tạo bản ghi rác.
+
+    Nếu thiết bị đã bị ADMIN thu hồi, endpoint trả 403 — client KHÔNG thể tự
+    mở khoá bằng cách đăng ký lại (trước đây chính lỗ hổng này làm tính năng
+    thu hồi thiết bị vô tác dụng).
     """
-    return ClientDeviceService.register(db, current_user, payload)
+    try:
+        return ClientDeviceService.register(db, current_user, payload)
+    except DeviceKeyError as exc:
+        if str(exc) == "DEVICE_REVOKED":
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail="Thiết bị này đã bị thu hồi. Liên hệ quản trị viên để được mở khoá.",
+            )
+        raise
 
 
 # --- Client attestation (Phase 0 — xác thực Safe Exam Browser Client) ---

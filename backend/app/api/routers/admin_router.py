@@ -1,4 +1,7 @@
+import logging
+from datetime import datetime, timezone
 from typing import List, Optional
+
 from fastapi import APIRouter, Depends, HTTPException, Query, Request, status
 from sqlalchemy.orm import Session, joinedload
 
@@ -15,7 +18,15 @@ from app.schemas.user_admin_schema import (
     UserStats,
     UserUpdate,
 )
+from app.models.client_device import ClientDevice
+from app.schemas.client_device_admin_schema import (
+    ClientDeviceAdminResponse,
+    ClientDeviceListResponse,
+    ClientDeviceRevokeRequest,
+)
 from app.services.audit_service import ACTIONS, AuditService
+
+logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/admin", tags=["User & Audit Management (Admin)"])
 
@@ -290,3 +301,105 @@ def list_audit_actions(
 ):
     """Danh sách loại thao tác để lọc trên giao diện."""
     return [{"code": code, "label": label} for code, label in ACTIONS.items()]
+
+
+# --- Thiết bị của thí sinh (Ed25519) ---
+#
+# Trước bản vá này KHÔNG có API quản trị nào cho `client_devices`: bảng được
+# ghi tự động khi client đăng ký, nhưng ADMIN không có cách thu hồi thiết bị
+# gian lận, cũng không có cách mở khoá khi thu hồi nhầm.
+
+@router.get("/devices", response_model=ClientDeviceListResponse)
+def list_client_devices(
+    user_id: Optional[int] = None,
+    revoked: Optional[bool] = None,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(require_role(["ADMIN"])),
+):
+    """Danh sách thiết bị đã đăng ký, lọc theo thí sinh / trạng thái thu hồi."""
+    query = db.query(ClientDevice).options(joinedload(ClientDevice.user))
+    if user_id is not None:
+        query = query.filter(ClientDevice.user_id == user_id)
+    if revoked is True:
+        query = query.filter(ClientDevice.revoked_at.isnot(None))
+    elif revoked is False:
+        query = query.filter(ClientDevice.revoked_at.is_(None))
+
+    rows = query.order_by(ClientDevice.created_at.desc()).all()
+    return ClientDeviceListResponse(
+        devices=[
+            ClientDeviceAdminResponse(
+                device_id=d.device_id,
+                user_id=d.user_id,
+                username=d.user.username if d.user else None,
+                label=d.label,
+                client_version=d.client_version,
+                weak_key_storage=bool(d.weak_key_storage),
+                capabilities=d.capabilities,
+                unsupported=d.unsupported,
+                created_at=d.created_at,
+                last_seen_at=d.last_seen_at,
+                revoked_at=d.revoked_at,
+            )
+            for d in rows
+        ],
+        total=len(rows),
+    )
+
+
+@router.post("/devices/{device_id}/revoke", response_model=ClientDeviceAdminResponse)
+def revoke_client_device(
+    device_id: str,
+    payload: ClientDeviceRevokeRequest,
+    request: Request,
+    user_id: Optional[int] = None,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(require_role(["ADMIN"])),
+):
+    """Thu hồi (`revoke=true`) hoặc mở khoá (`revoke=false`) một thiết bị.
+
+    Đây là ĐƯỜNG DUY NHẤT mở khoá được: endpoint đăng ký của client sẽ từ chối
+    (403) mọi thiết bị đang bị thu hồi, nên thí sinh không thể tự mở khoá bằng
+    cách chạy lại client.
+    """
+    query = db.query(ClientDevice).filter(ClientDevice.device_id == device_id)
+    if user_id is not None:
+        query = query.filter(ClientDevice.user_id == user_id)
+    device = query.first()
+    if device is None:
+        raise HTTPException(status_code=404, detail="Không tìm thấy thiết bị")
+
+    if payload.revoke:
+        if device.revoked_at is None:
+            device.revoked_at = datetime.now(timezone.utc)
+    else:
+        device.revoked_at = None
+
+    db.commit()
+    db.refresh(device)
+
+    AuditService.log(
+        db,
+        "DEVICE_REVOKE" if payload.revoke else "DEVICE_UNREVOKE",
+        current_user.id,
+        _client_ip(request),
+    )
+    logger.info(
+        "%s thiết bị %s (user=%s) bởi admin=%s. Lý do: %s",
+        "Thu hồi" if payload.revoke else "Mở khoá",
+        device.device_id, device.user_id, current_user.username, payload.reason,
+    )
+
+    return ClientDeviceAdminResponse(
+        device_id=device.device_id,
+        user_id=device.user_id,
+        username=device.user.username if device.user else None,
+        label=device.label,
+        client_version=device.client_version,
+        weak_key_storage=bool(device.weak_key_storage),
+        capabilities=device.capabilities,
+        unsupported=device.unsupported,
+        created_at=device.created_at,
+        last_seen_at=device.last_seen_at,
+        revoked_at=device.revoked_at,
+    )

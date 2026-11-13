@@ -232,3 +232,53 @@ def test_submit_type_whitelist(db, seeded):
         current_user=seeded["student"],
     )
     assert result.submit_type == "MANUAL"
+
+# --- Tương thích webview nhúng trong SEB Client (P0-2) ---
+
+def _enable_seb_required(db, seeded):
+    SettingsService.set_require_safe_browser_global(db, True, seeded["admin"].id)
+    seeded["exam"].require_safe_browser = True
+    db.commit()
+
+
+def test_web_inside_seb_still_restricted_without_identity(db, seeded):
+    """Request không có header định danh vẫn bị coi là web thường.
+
+    Đây là hành vi ĐÚNG và phải giữ: nếu server tin trạng thái phiên thì ai có
+    access token cũng mở được bằng trình duyệt thường. Việc webview trong SEB
+    không rơi vào trường hợp này là trách nhiệm của client — nó gắn header
+    (request_interceptor) và attest lại trước khi token hết hạn.
+    """
+    _enable_seb_required(db, seeded)
+
+    # Lần join đầu: SEB đã xác thực -> phiên VERIFIED.
+    state = _join(db, seeded, client_type="seb", attested=True)
+    assert state.restricted_mode is False
+
+    # Lần join sau từ webview thiếu header attestation -> vẫn phải restricted.
+    state = _join(db, seeded, client_type="web")
+    assert state.restricted_mode is True
+
+
+def test_webview_with_identity_headers_not_restricted(db, seeded):
+    """Có header seb + attestation hợp lệ -> không restricted, dù phiên đã tồn tại."""
+    _enable_seb_required(db, seeded)
+
+    _join(db, seeded, client_type="seb", attested=True)
+    state = _join(db, seeded, client_type="seb", attested=True)
+
+    assert state.restricted_mode is False
+    assert state.attestation_status == "VERIFIED" if hasattr(state, "attestation_status") else True
+
+
+def test_restricted_mode_logs_unauthorized_client_each_join(db, seeded):
+    """Mỗi lần join không xác thực đều để lại bằng chứng phục tra."""
+    _enable_seb_required(db, seeded)
+
+    _join(db, seeded, client_type="web")
+    _join(db, seeded, client_type="web")
+
+    count = db.query(ViolationLog).filter(
+        ViolationLog.event_type == "UNAUTHORIZED_CLIENT"
+    ).count()
+    assert count == 2

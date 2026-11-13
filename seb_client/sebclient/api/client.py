@@ -66,6 +66,15 @@ class ApiClient:
         """Chỉ dùng để tiêm vào web app. Xem ExamWindow._install_bootstrap_script."""
         return self._access_token
 
+    @property
+    def attestation_token(self) -> str | None:
+        """Token xác thực client — gắn vào header của request do webview phát ra."""
+        return self._attestation_token
+
+    @property
+    def device_fingerprint(self) -> str | None:
+        return self._device_fingerprint
+
     def set_attestation(self, token: str | None, device_fingerprint: str | None) -> None:
         self._attestation_token = token
         self._device_fingerprint = device_fingerprint
@@ -198,6 +207,31 @@ class ApiClient:
             logger.warning(
                 "Phien thi dang o restricted_mode — client chua duoc xac thuc day du"
             )
+        return data
+
+    async def submit_exam(self, session_token: str, submit_type: str = "AUTO_TIMEOUT") -> dict:
+        """Chủ động nộp bài lên server.
+
+        Tại sao client phải tự gọi: khi hết giờ, `ExamWindow` ẩn `web_view` để
+        hiện màn hình chặn. Trang React bên trong không còn cơ hội gửi POST nộp
+        bài, nên nếu chỉ dựa vào web app thì phiên thi sẽ kẹt IN_PROGRESS và
+        không bao giờ được chấm điểm.
+
+        Idempotent ở phía server: nộp lại phiên đã SUBMITTED trả về kết quả cũ.
+        """
+        self._require_auth()
+        response = await self._http.post(
+            "/exam-sessions/submit",
+            json={"submit_type": submit_type, "session_token": session_token},
+            headers=self._auth_headers(),
+        )
+        if response.status_code != 200:
+            raise ApiError(_friendly_message(response), response.status_code, response.text)
+        data = response.json()
+        logger.info(
+            "Da nop bai (type=%s): session=%s score=%s",
+            submit_type, session_token[:8], data.get("final_score"),
+        )
         return data
 
     def _require_auth(self) -> None:

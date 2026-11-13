@@ -47,13 +47,35 @@ class KeyboardGuard(BaseGuard):
         "Ctrl+Shift+Delete", "Shift+Delete",
     ]
 
-    def __init__(self, window, reporter=None):
+    def __init__(self, window, reporter=None, policy=None):
         super().__init__(window, reporter)
         self._shortcuts: list[QShortcut] = []
         self._view = None
+        self._policy = policy
+
+    def _devtools_sequences(self) -> list[str]:
+        if self._policy is not None and self._policy.allow_devtools:
+            return []
+        return self.DEVTOOLS_SEQUENCES
+
+    def _content_sequences(self) -> list[str]:
+        """Tổ hợp chặn nội dung, lọc theo policy của file `.seb` nếu có."""
+        if self._policy is None:
+            return self.CONTENT_SEQUENCES
+        sequences = []
+        for sequence in self.CONTENT_SEQUENCES:
+            if sequence == "Ctrl+P":
+                # In là một khoá riêng trong SEB, không nằm trong clipboard.
+                if not self._policy.allow_print:
+                    sequences.append(sequence)
+                continue
+            if self._policy.allow_copy_paste:
+                continue
+            sequences.append(sequence)
+        return sequences
 
     def install(self) -> None:
-        for sequence in self.DEVTOOLS_SEQUENCES:
+        for sequence in self._devtools_sequences():
             shortcut = QShortcut(QKeySequence(sequence), self._window)
             shortcut.setContext(Qt.ApplicationShortcut)
             shortcut.activated.connect(
@@ -65,7 +87,7 @@ class KeyboardGuard(BaseGuard):
             )
             self._shortcuts.append(shortcut)
 
-        for sequence in self.CONTENT_SEQUENCES:
+        for sequence in self._content_sequences():
             shortcut = QShortcut(QKeySequence(sequence), self._window)
             shortcut.setContext(Qt.ApplicationShortcut)
             shortcut.activated.connect(
@@ -120,6 +142,21 @@ class KeyboardGuard(BaseGuard):
         is_content = is_content or (shift and key == Qt.Key_Delete)
         is_switch = alt and key == Qt.Key_Tab
         is_meta_leak = meta and key in (Qt.Key_H, Qt.Key_I, Qt.Key_J, Qt.Key_C)
+
+        # Policy từ file `.seb` có thể NỚI LỎNG từng nhóm. Kiểm tra ở đây chứ
+        # không chỉ ở `install()` vì eventFilter chặn theo mẫu phím, độc lập
+        # với các QShortcut đã đăng ký.
+        if self._policy is not None:
+            if self._policy.allow_devtools:
+                is_devtools = False
+            if self._policy.allow_print and key == Qt.Key_P and ctrl and not shift:
+                is_content = False
+            if self._policy.allow_copy_paste and key in (
+                Qt.Key_C, Qt.Key_V, Qt.Key_X, Qt.Key_A,
+            ):
+                is_content = False
+            if not self._policy.block_alt_tab:
+                is_switch = False
 
         if is_devtools:
             self.report(

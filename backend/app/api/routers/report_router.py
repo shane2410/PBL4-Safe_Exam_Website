@@ -4,6 +4,10 @@ from fastapi.responses import StreamingResponse
 from sqlalchemy.orm import Session
 from app.core.database import get_db
 from app.dependencies.auth import require_role
+from app.dependencies.ownership import (
+    ensure_schedule_owner_by_id,
+    ensure_session_owner_by_id,
+)
 from app.models.user import User
 from app.models.violation_log import ViolationLog
 from app.schemas.report_schema import ExamScheduleStatistics
@@ -19,6 +23,7 @@ def get_schedule_statistics(
     current_user: User = Depends(require_role(["ADMIN", "TEACHER"]))
 ):
     """Get candidate results, summary metrics and violation stats for an exam schedule."""
+    ensure_schedule_owner_by_id(db, schedule_id, current_user)
     return ReportService.get_schedule_statistics(db, schedule_id)
 
 @router.get("/schedules/{schedule_id}/export-excel")
@@ -28,6 +33,7 @@ def export_schedule_excel(
     current_user: User = Depends(require_role(["ADMIN", "TEACHER"]))
 ):
     """Export exam results to Excel (.xlsx) using openpyxl."""
+    ensure_schedule_owner_by_id(db, schedule_id, current_user)
     excel_stream = ReportService.export_excel(db, schedule_id)
     return StreamingResponse(
         excel_stream,
@@ -42,6 +48,7 @@ def export_schedule_pdf(
     current_user: User = Depends(require_role(["ADMIN", "TEACHER"]))
 ):
     """Export exam results to PDF using reportlab."""
+    ensure_schedule_owner_by_id(db, schedule_id, current_user)
     pdf_stream = ReportService.export_pdf(db, schedule_id)
     return StreamingResponse(
         pdf_stream,
@@ -56,6 +63,7 @@ def get_session_violations(
     current_user: User = Depends(require_role(["ADMIN", "TEACHER"]))
 ):
     """View full chronological violation audit logs for a single candidate session."""
+    ensure_session_owner_by_id(db, session_id, current_user)
     logs = db.query(ViolationLog).filter(
         ViolationLog.session_id == session_id
     ).order_by(ViolationLog.client_timestamp.asc()).all()

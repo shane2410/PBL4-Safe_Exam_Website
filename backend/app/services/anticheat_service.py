@@ -31,18 +31,33 @@ MAX_RISK_SCORE = 1000
 
 class AnticheatService:
     @staticmethod
-    def resolve_max_violations(db: Session, session: ExamSession) -> int:
-        """Ngưỡng số lần vi phạm trước khi hệ thống tự nộp bài.
+    def resolve_max_violations_for_exam(db: Session, exam) -> int:
+        """Ngưỡng vi phạm cho một đề thi, theo đúng thứ tự ưu tiên đã tài liệu hoá.
 
-        Thứ tự ưu tiên: exam_security_configs -> exams.max_violation_allowed ->
-        DEFAULT_MAX_VIOLATION_ALLOWED trong config.
+        1. `exam_security_configs` (GV cấu hình riêng cho đề)
+        2. `exams.max_violation_allowed` (cột có sẵn trên đề)
+        3. `DEFAULT_MAX_VIOLATION_ALLOWED` trong config
+
+        Mọi nơi hiển thị/áp ngưỡng (join response, monitor, auto-submit) phải
+        dùng CÙNG hàm này, nếu không UI và server lại lệch nhau.
         """
-        exam = session.schedule.exam if session.schedule else None
         if exam is None:
             return settings.DEFAULT_MAX_VIOLATION_ALLOWED
 
-        policy = ExamSecurityService.resolve_policy(db, exam.id)
-        return policy.max_tab_switch + policy.max_fullscreen_exit
+        exam_config = ExamSecurityService.get_stored_config(db, exam.id)
+        if exam_config is not None:
+            return exam_config.max_tab_switch + exam_config.max_fullscreen_exit
+
+        if exam.max_violation_allowed:
+            return int(exam.max_violation_allowed)
+
+        return settings.DEFAULT_MAX_VIOLATION_ALLOWED
+
+    @staticmethod
+    def resolve_max_violations(db: Session, session: ExamSession) -> int:
+        """Ngưỡng số lần vi phạm của phiên thi hiện tại."""
+        exam = session.schedule.exam if session.schedule else None
+        return AnticheatService.resolve_max_violations_for_exam(db, exam)
 
     @staticmethod
     def record_violation(
@@ -85,13 +100,15 @@ class AnticheatService:
             weight = RISK_WEIGHTS.get(v_data.event_type, 10)
             session.risk_score = min(session.risk_score + weight, MAX_RISK_SCORE)
 
-            # Đếm tổng số vi phạm của phiên
-            total_violations = db.query(ViolationLog).filter(
-                ViolationLog.session_id == session_id
-            ).count()
+            # Đếm số vi phạm THUỘC DIỆN TÍNH NGƯỠNG (tab switch + fullscreen exit).
+            # Trước đây đếm TẤT CẢ ViolationLog, nên DEVTOOLS_DETECTED,
+            # COPY_PASTE_ATTEMPT, RIGHT_CLICK_ATTEMPT, CONNECTION_LOST,
+            # DUPLICATE_LOGIN... cũng ăn vào quota chuyển tab -> tự nộp sớm hơn
+            # cấu hình, lệch với bộ đếm hiển thị cho thí sinh.
+            counted_violations = session.tab_switch_count + session.fullscreen_exit_count
 
             max_allowed = AnticheatService.resolve_max_violations(db, session)
-            threshold_exceeded = (total_violations >= max_allowed) and (session.status == "IN_PROGRESS")
+            threshold_exceeded = (counted_violations >= max_allowed) and (session.status == "IN_PROGRESS")
 
             db.commit()
             db.refresh(v_log)

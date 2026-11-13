@@ -35,6 +35,7 @@ class ExamSocket:
         backend_url: str,
         room_code: str,
         session_token: str,
+        access_token: str = "",
         interval_seconds: int = HEARTBEAT_INTERVAL_SECONDS,
         on_force_submit: Callable[[dict], None] | None = None,
         on_status_change: Callable[[dict], None] | None = None,
@@ -42,6 +43,8 @@ class ExamSocket:
         self._backend_url = backend_url
         self._room_code = room_code
         self._session_token = session_token
+        # JWT của phiên đăng nhập — server bắt buộc khi handshake socket.
+        self._access_token = access_token
         self._interval = interval_seconds
         self._on_force_submit = on_force_submit
         self._on_status_change = on_status_change
@@ -82,7 +85,11 @@ class ExamSocket:
 
     async def connect_and_join(self) -> dict:
         """Kết nối socket và vào phòng. Trả về ack của server."""
-        await self._sio.connect(self._backend_url, transports=["websocket"])
+        await self._sio.connect(
+            self._backend_url,
+            transports=["websocket"],
+            auth={"token": self._access_token},
+        )
         ack = await self._sio.call(
             EVENT_JOIN_ROOM,
             {"room_code": self._room_code, "session_token": self._session_token},

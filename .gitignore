@@ -4,6 +4,7 @@ skills.md
 SRS_He_thong_thi_truc_tuyen_v2.docx
 *.docx
 SRS*
+AGENTS.md
 
 # Environment & Secrets
 .env
@@ -23,6 +24,8 @@ ENV/
 build/
 develop-eggs/
 dist/
+dist-win/
+build-win/
 downloads/
 eggs/
 .eggs/
@@ -61,5 +64,13 @@ frontend/.vite/
 Thumbs.db
 .idea/
 .vscode/
+.opencode/
 *.swp
 *.swo
+
+# File cấu hình SEB phát hành cho thí sinh (chứa URL cụ thể từng kỳ thi)
+*.seb
+*.seb2
+
+
+graphify-out/

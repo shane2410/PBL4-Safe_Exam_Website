@@ -36,6 +36,18 @@ EVENT_VIOLATION = "violation"
 EVENT_FORCE_SUBMIT = "force_submit"
 EVENT_STATUS_CHANGE = "student_status_change"
 
+# Đường dẫn trang kết quả của web app. Client dùng để biết phiên đã nộp xong —
+# `submit` là request do TRANG phát ra, client không có kênh nào khác.
+RESULTS_PATH_SUFFIX = "/exam/results"
+
+# Thời gian sống của attestation token phía server (phút). Xem
+# backend/app/services/attestation_service.py:ATTESTATION_TOKEN_TTL_MINUTES.
+# Client phải attest lại TRƯỚC mốc này, nếu không các request sau sẽ bị server
+# coi là web thường giữa kỳ thi.
+ATTESTATION_TTL_MINUTES = 5
+# Attest lại sớm hơn TTL để không có khoảng trống nào token đã hết hạn.
+ATTESTATION_REFRESH_SECONDS = 240
+
 # Sự kiện client -> OS. Mỗi guard bắt một sự kiện riêng để BaseGuard
 # chỉ cần biết "loại vi phạm nào" mà không phải if/elif dài.
 EVENT_VIOLATION_REPORTED = "seb_violation_reported"

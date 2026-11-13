@@ -87,6 +87,13 @@ class ExamSessionService:
 
         # Client tự khai là SEB thì vẫn phải được xác thực bằng challenge-response.
         # Nếu chưa attest -> coi như web thường (không tin lời khai của client).
+        #
+        # KHÔNG dùng trạng thái phiên để suy ra điều này: một phiên đã VERIFIED
+        # rồi thì ai có access token cũng mở được bằng trình duyệt thường, đúng
+        # thứ cần chặn. Việc trang web nhúng trong SEB không bị coi là "web" là
+        # trách nhiệm của client — nó phải gắn header định danh cho request do
+        # webview phát ra (sebclient/ui/request_interceptor.py) và attest lại
+        # trước khi token 5 phút hết hạn.
         claims_seb = identity.is_seb
         is_verified_seb = claims_seb and identity.attested
         restricted_mode = seb_required and not is_verified_seb
@@ -136,6 +143,14 @@ class ExamSessionService:
         else:
             if session.status == "SUBMITTED":
                 raise HTTPException(status_code=400, detail="Bạn đã nộp bài thi này rồi")
+            # Phiên từng bị heartbeat đánh dấu DISCONNECTED (rớt mạng > ngưỡng)
+            # phải được đưa về IN_PROGRESS khi thí sinh vào lại. Nếu không,
+            # `AnticheatService.record_violation` (yêu cầu status == IN_PROGRESS)
+            # sẽ bỏ qua im lặng MỌI vi phạm còn lại và ngưỡng tự nộp không bao
+            # giờ kích hoạt nữa.
+            if session.status == "DISCONNECTED":
+                session.status = "IN_PROGRESS"
+                logger.info("Phiên %d vào lại sau khi mất kết nối -> IN_PROGRESS", session.id)
             # Update IP and user-agent on reconnect
             if ip_address or user_agent:
                 if ip_address:
@@ -278,7 +293,11 @@ class ExamSessionService:
             started_at=session.started_at,
             server_time=now,
             remaining_seconds=remaining_seconds,
-            max_violation_allowed=policy.max_tab_switch + policy.max_fullscreen_exit,
+            max_violation_allowed=AnticheatService.resolve_max_violations_for_exam(db, exam),
+            # Khôi phục bộ đếm đã tích luỹ (F5 / vào lại phòng) để UI hiển thị
+            # đúng "x/y" thay vì luôn bắt đầu lại từ 0.
+            tab_switch_count=session.tab_switch_count or 0,
+            fullscreen_exit_count=session.fullscreen_exit_count or 0,
             questions=public_questions,
             saved_answers=saved_dict,
             security_policy=policy,

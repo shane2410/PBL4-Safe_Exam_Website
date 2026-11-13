@@ -3,6 +3,10 @@ from fastapi import APIRouter, Depends, Request, status
 from sqlalchemy.orm import Session
 from app.core.database import get_db
 from app.dependencies.auth import require_role
+from app.dependencies.ownership import (
+    ensure_exam_owner_by_id,
+    ensure_schedule_owner_by_id,
+)
 from app.models.user import User
 from app.schemas.exam_schema import (
     ExamCreate, ExamUpdate, ExamResponse, ExamDetailResponse,
@@ -53,6 +57,7 @@ def update_exam(
     current_user: User = Depends(require_role(["ADMIN", "TEACHER"]))
 ):
     """Update exam parameters and question list."""
+    ensure_exam_owner_by_id(db, exam_id, current_user)
     updated = ExamService.update_exam(db, exam_id, data)
     AuditService.log(db, "EXAM_UPDATE", current_user.id, request.client.host if request.client else None)
     return updated
@@ -65,6 +70,7 @@ def delete_exam(
     current_user: User = Depends(require_role(["ADMIN", "TEACHER"]))
 ):
     """Delete an exam."""
+    ensure_exam_owner_by_id(db, exam_id, current_user)
     result = ExamService.delete_exam(db, exam_id)
     AuditService.log(db, "EXAM_DELETE", current_user.id, request.client.host if request.client else None)
     return result
@@ -100,6 +106,7 @@ def update_schedule(
     current_user: User = Depends(require_role(["ADMIN", "TEACHER"]))
 ):
     """Update an exam schedule."""
+    ensure_schedule_owner_by_id(db, schedule_id, current_user)
     updated = ExamService.update_schedule(db, schedule_id, data)
     AuditService.log(db, "SCHEDULE_UPDATE", current_user.id, request.client.host if request.client else None)
     return updated

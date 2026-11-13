@@ -44,12 +44,37 @@ export default function ExamRoom() {
   // nộp xong). Mọi cơ chế giám sát phải DỪNG, và bộ đếm phải ngừng tăng.
   const [locked, setLocked] = useState(false)
   const [serverNotice, setServerNotice] = useState('')
+  // Lỗi nộp bài CÓ THỂ THỬ LẠI (mạng, 5xx, timeout). Khi có giá trị, UI hiện
+  // nút "Thử nộp lại". Trước đây `setLocked(true)` chạy trước request và
+  // không bao giờ được gỡ, nên chỉ cần một lần mất mạng là thí sinh kẹt vĩnh
+  // viễn ở màn hình khoá trong khi phiên phía server vẫn IN_PROGRESS và
+  // KHÔNG được chấm điểm.
+  const [submitError, setSubmitError] = useState('')
+  // Loại nộp của lần gần nhất, để nút "Thử nộp lại" dùng lại đúng submit_type
+  // (VD vẫn là AUTO_TIMEOUT, không âm thầm đổi thành MANUAL).
+  const lastSubmitTypeRef = useRef('MANUAL')
   // false = đang ở màn "sẵn sàng", true = đã bấm Bắt đầu thi.
   // Bắt buộc có bước này vì trình duyệt chỉ cho gọi requestFullscreen() khi
   // người dùng vừa bấm chuột/phím.
   const [started, setStarted] = useState(false)
   const [startError, setStartError] = useState('')
   const [fullscreenBlocked, setFullscreenBlocked] = useState(false)
+
+  // Chống gọi nộp bài hai lần (bấm tay + hết giờ + server force_submit).
+  // Dùng ref vì `setSubmitting` là bất đồng bộ: hai sự kiện trong cùng một tick
+  // vẫn có thể cùng đọc `submitting === false`.
+  const submittingRef = useRef(false)
+  // Đã nộp thành công: chặn mọi lần nộp lặp lại trong lúc chờ điều hướng.
+  const submittedRef = useRef(false)
+  // Chỉ tự nộp MỘT lần khi đồng hồ về 0.
+  const autoSubmitFiredRef = useRef(false)
+  // Luôn trỏ tới `flush` mới nhất của useAutoSave. `handleForceSubmit` được
+  // useCallback với deps cố định nên nếu gọi trực tiếp `flush` nó sẽ giữ
+  // closure cũ (đáp án cũ) — ref thì luôn đọc bản mới nhất.
+  const flushAnswersRef = useRef(null)
+  // Luôn trỏ tới `submitExam` mới nhất cho useEffect đếm ngược (tránh phải
+  // thêm submitExam vào deps và tạo lại interval mỗi render).
+  const submitExamRef = useRef(null)
 
   const join = useCallback(async () => {
     setJoining(true)
@@ -63,6 +88,11 @@ export default function ExamRoom() {
       setAnswers(data.saved_answers || {})
       setRemaining(data.remaining_seconds)
       setGateDismissed(false)
+      // Vào lại phòng (sau lỗi/retry) là một lượt mới: cho phép tự nộp lại
+      // khi đồng hồ về 0, và bỏ khoá chống nộp trùng của lượt trước.
+      autoSubmitFiredRef.current = false
+      submittingRef.current = false
+      submittedRef.current = false
     } catch (err) {
       setJoinError(extractErrorMessage(err, 'Không vào được phòng thi.'))
     } finally {
@@ -85,15 +115,30 @@ export default function ExamRoom() {
   // mount) sẽ rơi vào vùng chết tạm (TDZ) và ném ReferenceError.
   const submitExam = async (submitType = 'MANUAL') => {
     if (!state?.session_token) return
+    if (submittingRef.current || submittedRef.current) return
+    submittingRef.current = true
+    lastSubmitTypeRef.current = submitType
     setSubmitting(true)
-    // Khoá ngay khi bắt đầu nộp, kể cả khi thất bại — tránh khoảng thời gian
-    // bài đã thu mà bộ đếm vẫn chạy.
+    setSubmitError('')
+    // Khoá ngay khi bắt đầu nộp (tránh bộ đếm vi phạm chạy tiếp trong lúc
+    // request đang bay). Nếu nộp THẤT BẠI vì lỗi tạm thời, catch bên dưới
+    // sẽ mở khoá lại — xem A8.
     setLocked(true)
     try {
+      // ĐẨY NỐT ĐÁP ÁN ĐANG CHỜ TRƯỚC KHI NỘP.
+      //
+      // useAutoSave debounce 1.5s: nếu thí sinh chọn câu cuối rồi bấm "Nộp bài"
+      // ngay, câu đó vẫn nằm trong dirtyRef. Server chuyển phiên sang SUBMITTED
+      // và chấm điểm trước khi request lưu tới nơi -> mất điểm câu cuối.
+      // `flush()` tự nuốt lỗi (VD 403 khi đã quá hạn) nên không chặn việc nộp.
+      await flushAnswersRef.current?.()
       await apiClient.post('/exam-sessions/submit', {
         submit_type: submitType,
         session_token: state.session_token,
       })
+      // Đã nộp thành công -> giữ khoá vĩnh viễn, không cho nộp lại trong
+      // khoảng thời gian ngắn trước khi `navigate` unmount component.
+      submittedRef.current = true
       navigate('/exam/results')
     } catch (err) {
       const status = err?.response?.status
@@ -108,9 +153,18 @@ export default function ExamRoom() {
         return
       }
 
+      // Lỗi TẠM THỜI (mất mạng, timeout, 5xx): phiên phía server vẫn có thể
+      // IN_PROGRESS. Mở khoá và cho thí sinh thử lại, nếu không bài sẽ không
+      // bao giờ được chấm.
+      setLocked(false)
+      setSubmitError(message)
       setServerNotice(message)
     } finally {
       setSubmitting(false)
+      // Chỉ giữ khoá chống nộp trùng khi đã điều hướng thành công. Nếu lỗi
+      // mạng, phải cho phép thử lại — nếu không, thí sinh kẹt ở màn hình
+      // khoá trong khi phiên phía server vẫn IN_PROGRESS (không được chấm).
+      submittingRef.current = false
     }
   }
 
@@ -149,7 +203,20 @@ export default function ExamRoom() {
   // Số lần vi phạm đã ghi nhận TRONG PHIÊN NÀY, theo từng loại.
   // Đây chỉ để HIỂN THỊ cho thí sinh — server vẫn là nguồn quyết định có nộp
   // bài hay không (client không được tự quyết, xem skills.md Quy tắc #4.3).
+  // Giá trị được đồng bộ từ server trong join() — xem ngay dưới đây.
   const [strikes, setStrikes] = useState({ TAB_SWITCH: 0, FULLSCREEN_EXIT: 0 })
+
+  // Đồng bộ bộ đếm hiển thị với server mỗi khi `state` được nạp/refresh.
+  // Nếu chỉ khởi tạo useState một lần, F5 giữa chừng sẽ làm UI hiện "0/8"
+  // trong khi server đã đếm 7/8 và có thể tự nộp ngay lần vi phạm kế tiếp —
+  // thí sinh không hiểu vì sao bị thu bài.
+  useEffect(() => {
+    if (!state) return
+    setStrikes({
+      TAB_SWITCH: state.tab_switch_count || 0,
+      FULLSCREEN_EXIT: state.fullscreen_exit_count || 0,
+    })
+  }, [state])
   const lastIncidentRef = useRef(0)
   // handleIncident được useCallback theo [logViolation, triggerWarning]; nếu đọc
   // `locked` trực tiếp thì phải thêm nó vào deps. Dùng ref cho gọn và để
@@ -208,7 +275,10 @@ export default function ExamRoom() {
     onAway: (source) => handleIncident('TAB_SWITCH', source),
   })
   useKeyboardBlock({
-    enabled: inProgress && (policy.block_copy_paste || policy.block_devtools),
+    // Ba cờ ĐỘC LẬP: tắt cờ nào là tắt đúng cơ chế đó, không kéo theo cờ khác.
+    blockCopyPaste: inProgress && policy.block_copy_paste,
+    blockDevTools: inProgress && policy.block_devtools,
+    disablePrint: inProgress && policy.disable_print,
     logViolation,
   })
   useDevToolsDetector({
@@ -259,10 +329,13 @@ export default function ExamRoom() {
     setStarted(true)
   }, [policy.require_fullscreen, policy.allow_web_fallback, fullscreen])
 
-  const { status: saveStatus } = useAutoSave({
+  const { status: saveStatus, flush: flushAnswers } = useAutoSave({
     sessionToken: state?.session_token,
     answers,
   })
+  // Nối vào ref để submitExam (khai báo phía trên) luôn dùng bản mới nhất.
+  flushAnswersRef.current = flushAnswers
+  submitExamRef.current = submitExam
 
   // --- Đồng hồ đếm ngược, bám theo mốc server trả về ---
   useEffect(() => {
@@ -273,7 +346,19 @@ export default function ExamRoom() {
 
     const timer = setInterval(() => {
       const elapsed = Math.floor((Date.now() - offset - serverNow) / 1000)
-      setRemaining(Math.max(0, state.remaining_seconds - elapsed))
+      const next = Math.max(0, state.remaining_seconds - elapsed)
+      setRemaining(next)
+
+      // HẾT GIỜ -> TỰ NỘP.
+      //
+      // Trước đây đồng hồ chỉ dừng ở 00:00, không hề nộp bài: thí sinh vẫn
+      // thấy đề, phiên phía server kẹt IN_PROGRESS và không được chấm điểm.
+      // Server phía sau cũng chặn save-answer (403) nên bài coi như mất trắng.
+      if (next <= 0 && !autoSubmitFiredRef.current && !lockedRef.current) {
+        autoSubmitFiredRef.current = true
+        clearInterval(timer)
+        submitExamRef.current?.('AUTO_TIMEOUT')
+      }
     }, 1000)
 
     return () => clearInterval(timer)
@@ -606,6 +691,19 @@ export default function ExamRoom() {
           <div className="max-w-[1400px] mx-auto flex items-center gap-2 px-4 py-3 rounded-lg bg-warning-50 border border-warning-200 text-warning-900">
             <Icon name="warning" size={18} />
             <span>{serverNotice}</span>
+            {/* Nộp thất bại vì lỗi tạm thời -> cho thử lại. Không có nút này
+                thì thí sinh kẹt: server vẫn IN_PROGRESS nên bài không được chấm. */}
+            {submitError && (
+              <button
+                type="button"
+                onClick={() => submitExam(lastSubmitTypeRef.current)}
+                disabled={submitting}
+                className="btn-primary ml-auto flex-shrink-0"
+              >
+                <Icon name="refresh" size={16} />
+                {submitting ? 'Đang nộp…' : 'Thử nộp lại'}
+              </button>
+            )}
           </div>
         </div>
       )}

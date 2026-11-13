@@ -12,6 +12,7 @@ duy nhất quyết định tự nộp bài.
 
 from __future__ import annotations
 
+import asyncio
 import logging
 
 from PySide6.QtCore import Qt, QUrl
@@ -26,8 +27,19 @@ from PySide6.QtWidgets import QMainWindow
 
 from ..api.heartbeat import ExamSocket
 from ..config import ClientConfig
+from ..constants import (
+    ATTESTATION_REFRESH_SECONDS,
+    CLIENT_TYPE,
+    CLIENT_VERSION,
+    HEADER_ATTESTATION,
+    HEADER_CLIENT_TYPE,
+    HEADER_CLIENT_VERSION,
+    HEADER_DEVICE_FINGERPRINT,
+    RESULTS_PATH_SUFFIX,
+)
 from ..guards.base import BaseGuard
 from .blocked_overlay import BlockedOverlay
+from .request_interceptor import ClientIdentityInterceptor
 from .warning_overlay import WarningOverlay
 from .web_page import GuardedWebEnginePage
 from ..guards.clipboard_guard import ClipboardGuard
@@ -63,6 +75,15 @@ class ExamWindow(QMainWindow):
         self._guards: list[BaseGuard] = []
         self._session_token: str | None = None
         self._ever_fullscreen = False
+        self._attest_timer = None
+        self._attest_inflight = False
+        # Lưu event loop của qasync ngay lúc tạo cửa sổ: `_on_time_expired`
+        # chạy trong slot QTimer (đồng bộ) nên cần loop này để đẩy coroutine
+        # nộp bài vào. Lưu sớm vì lúc đóng cửa sổ loop có thể đã ngừng.
+        try:
+            self._loop = asyncio.get_running_loop()
+        except RuntimeError:
+            self._loop = None
 
         self.setWindowTitle(f"Phòng thi {room_code}")
         self._build_view()
@@ -78,6 +99,16 @@ class ExamWindow(QMainWindow):
         self._profile = QWebEngineProfile()
         self._profile.setHttpCacheType(QWebEngineProfile.NoCache)
 
+        # Gắn định danh client cho request do TRANG WEB phát ra. Thiếu bước này
+        # thì server coi phiên đã xác thực SEB là web thường -> trả
+        # `restricted_mode = true` và cộng oan UNAUTHORIZED_CLIENT.
+        self._interceptor = ClientIdentityInterceptor(
+            header_provider=self._client_headers,
+            allowed_origins=self._config.allowed_origins,
+            parent=self._profile,
+        )
+        self._profile.setUrlRequestInterceptor(self._interceptor)
+
         # lambda để tra cứu `self._report_violation` tại thời điểm gọi. Truyền
         # thẳng bound method sẽ khóa cứng vào hàm cũ, khiến các guard thay
         # reporter sau này không còn được gọi.
@@ -92,8 +123,60 @@ class ExamWindow(QMainWindow):
         page.settings().setAttribute(QWebEngineSettings.PluginsEnabled, False)
         page.settings().setAttribute(QWebEngineSettings.FullScreenSupportEnabled, True)
 
+        # Trang web thi tự gọi `document.documentElement.requestFullscreen()`
+        # (hook useFullscreenLock). Không nối signal này thì lời hứa JS KHÔNG
+        # BAO GIỜ settle: nút "Bắt đầu thi" treo, thí sinh không vào được phòng.
+        page.fullScreenRequested.connect(self._on_fullscreen_requested)
+
+        # Biết khi nào thí sinh đã nộp xong để mở khoá kiosk — nếu không họ bị
+        # kẹt trong cửa sổ không đóng được ở trang kết quả.
+        page.urlChanged.connect(self._on_url_changed)
+
         self.web_view = QWebEngineView(page)
         self.setCentralWidget(self.web_view)
+
+    def _client_headers(self) -> dict[str, str]:
+        """Header định danh, đọc tại thời điểm request (token có TTL 5 phút)."""
+        headers = {
+            HEADER_CLIENT_TYPE: CLIENT_TYPE,
+            HEADER_CLIENT_VERSION: CLIENT_VERSION,
+        }
+        token = self._api.attestation_token
+        if token:
+            headers[HEADER_ATTESTATION] = token
+        fingerprint = self._api.device_fingerprint
+        if fingerprint:
+            headers[HEADER_DEVICE_FINGERPRINT] = fingerprint
+        return headers
+
+    def _on_fullscreen_requested(self, request) -> None:
+        """Chấp nhận yêu cầu fullscreen từ trang và áp lên cửa sổ Qt."""
+        if request.toggleOn():
+            request.accept()
+            self.showFullScreen()
+            self._ever_fullscreen = True
+            logger.info("Trang yeu cau fullscreen -> da bat")
+        else:
+            request.accept()
+            # KioskGuard đang giữ fullscreen; chỉ thoát khi phiên đã kết thúc.
+            if getattr(self, "_blocked", False):
+                self.showNormal()
+            logger.info("Trang yeu cau thoat fullscreen (bi bo qua khi dang thi)")
+
+    def _on_url_changed(self, url) -> None:
+        """Phiên kết thúc khi web app chuyển sang trang kết quả.
+
+        Web app điều hướng sang `/exam/results` sau khi nộp thành công. Client
+        không có kênh nào khác để biết việc này (`submit` là request của trang),
+        nên đây là tín hiệu duy nhất. Không bắt thì thí sinh đứng ở trang kết
+        quả trong cửa sổ kiosk không đóng được.
+        """
+        if self._blocked:
+            return
+        path = url.path() if hasattr(url, "path") else ""
+        if path.rstrip("/").endswith(RESULTS_PATH_SUFFIX):
+            logger.info("Web app da nop bai -> ket thuc phien, mo khoa cua so")
+            self._show_blocked("Bạn đã nộp bài. Có thể đóng cửa sổ này.")
 
     def _build_os_adapter(self) -> None:
         """Tạo adapter hệ điều hành đúng một lần và chia sẻ cho các guard.
@@ -190,6 +273,7 @@ class ExamWindow(QMainWindow):
                 backend_url=self._config.backend_url,
                 room_code=self._room_code,
                 session_token=self._session_token,
+                access_token=self._api.access_token or "",
                 interval_seconds=self._config.heartbeat_interval,
                 on_force_submit=self._on_force_submit,
             )
@@ -203,8 +287,56 @@ class ExamWindow(QMainWindow):
             guard.install()
 
         self.load_exam_page()
+        self._start_attestation_refresh()
         logger.info("Bat dau thi: %s", self._state.get("exam_title"))
         return True
+
+    def _start_attestation_refresh(self) -> None:
+        """Attest lại định kỳ trong suốt phiên thi.
+
+        Attestation token sống 5 phút, còn ca thi có thể dài 45-120 phút. Nếu
+        chỉ attest một lần lúc join, mọi request do trang web phát ra sau phút
+        thứ 5 sẽ mang token hết hạn -> server coi là web thường -> nếu thí sinh
+        F5 (join lại) họ bị đẩy sang `restricted_mode` giữa kỳ thi.
+
+        Chạy bằng `QTimer` (không phải coroutine) vì phải sống suốt vòng đời
+        cửa sổ và không được chặn Qt event loop.
+        """
+        from PySide6.QtCore import QTimer
+
+        self._attest_timer = QTimer(self)
+        self._attest_timer.setInterval(ATTESTATION_REFRESH_SECONDS * 1000)
+        self._attest_timer.timeout.connect(self._refresh_attestation)
+        self._attest_timer.start()
+
+    def _refresh_attestation(self) -> None:
+        """Attest lại trên event loop qasync — không await trong slot Qt."""
+        loop = self._loop
+        if loop is None or loop.is_closed():
+            return
+        if getattr(self, "_attest_inflight", False):
+            return
+        self._attest_inflight = True
+
+        async def _run() -> None:
+            try:
+                from ..api.attestation import ClientAttestor
+
+                result = await ClientAttestor(self._api, self._device_key).attest()
+                if result.attested:
+                    logger.info("Attest lai thanh cong")
+                else:
+                    logger.warning("Attest lai that bai: %s", result.reason)
+            except Exception as exc:  # noqa: BLE001 - không được làm sập phiên thi
+                logger.warning("Loi khi attest lai: %s", exc)
+            finally:
+                self._attest_inflight = False
+
+        try:
+            asyncio.run_coroutine_threadsafe(_run(), loop)
+        except RuntimeError as exc:
+            self._attest_inflight = False
+            logger.warning("Khong len lich duoc attest lai: %s", exc)
 
     def load_exam_page(self) -> None:
         if not self._session_token:
@@ -292,9 +424,50 @@ class ExamWindow(QMainWindow):
         self._report_violation(VIOLATION_TAB_SWITCH, {"detected": "os_window_switch"})
 
     def _on_time_expired(self) -> None:
-        """Hết giờ làm bài theo đồng hồ đếm ngược của client."""
-        logger.warning("Hết giờ — thông báo cho thí sinh")
+        """Hết giờ làm bài theo đồng hồ đếm ngược của client.
+
+        QUAN TRỌNG: phải chủ động nộp bài từ client.
+
+        `_show_blocked` ẩn `web_view`, nên trang React bên trong KHÔNG còn cơ
+        hội gửi POST /exam-sessions/submit. Trước đây chỉ hiện thông báo "đã
+        thu bài" trong khi server vẫn để phiên IN_PROGRESS và chưa chấm điểm.
+        """
+        logger.warning("Hết giờ — nộp bài (AUTO_TIMEOUT) rồi thông báo cho thí sinh")
+        self._submit_after_timeout()
         self._show_blocked("Đã hết thời gian làm bài. Bài của bạn đã được hệ thống thu.")
+
+    def _submit_after_timeout(self) -> None:
+        """Gửi submit AUTO_TIMEOUT mà không chặn Qt event loop.
+
+        `_on_time_expired` chạy trong slot của QTimer (đồng bộ), nên không thể
+        `await` trực tiếp. Dùng `run_coroutine_threadsafe` lên loop đã lưu —
+        cùng cách `ExamSocket.send_violation_soon` làm, tránh lỗi
+        "Cannot enter into task ... while another task is being executed".
+        """
+        if not self._session_token:
+            logger.error("Hết giờ nhưng chưa có session_token — không thể nộp bài")
+            return
+
+        loop = self._loop
+        if loop is None or loop.is_closed():
+            logger.error("Hết giờ nhưng event loop không dùng được — bỏ qua nộp bài")
+            return
+
+        try:
+            future = asyncio.run_coroutine_threadsafe(
+                self._api.submit_exam(self._session_token, submit_type="AUTO_TIMEOUT"),
+                loop,
+            )
+            future.add_done_callback(self._log_timeout_submit)
+        except RuntimeError as exc:
+            logger.error("Không lên lịch được nộp bài khi hết giờ: %s", exc)
+
+    @staticmethod
+    def _log_timeout_submit(future) -> None:
+        try:
+            future.result()
+        except Exception as exc:  # noqa: BLE001 - chỉ ghi log, màn hình đã khoá
+            logger.error("Nộp bài khi hết giờ thất bại: %s", exc)
 
     def _show_blocked(self, reason: str) -> None:
         """Dừng toàn bộ cơ chế giám sát rồi hiện màn hình chặn.
@@ -333,6 +506,10 @@ class ExamWindow(QMainWindow):
 
     def closeEvent(self, event):  # noqa: N802
         logger.info("Dong cua so thi")
+        timer = getattr(self, "_attest_timer", None)
+        if timer is not None:
+            timer.stop()
+            timer = None
         for guard in self._guards:
             try:
                 guard.uninstall()

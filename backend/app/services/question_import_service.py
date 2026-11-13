@@ -47,14 +47,25 @@ def _new_token() -> str:
     return "imp_" + "".join(random.choices(string.ascii_lowercase + string.digits, k=32))
 
 
-def find_existing_fingerprints(db: Session, questions: List[ParsedQuestion]) -> set:
-    """Trả về tập fingerprint đã tồn tại trong ngân hàng câu hỏi.
+def find_existing_fingerprints(
+    db: Session, questions: List[ParsedQuestion], subject_id: int
+) -> set:
+    """Trả về tập fingerprint đã tồn tại TRONG CÙNG MÔN với câu sắp import.
 
-    Tải toàn bộ nội dung câu hỏi hiện có rồi so khớp ở tầng ứng dụng. Với quy mô
-    ngân hàng của một trường (hàng nghìn câu) cách này đủ nhanh và tránh phải
-    thêm chỉ mục mới.
+    Phải lọc theo `subject_id`: trước đây hàm quét toàn bộ ngân hàng câu hỏi,
+    nên một câu cơ bản (VD "TCP là giao thức tầng nào?") đã có ở môn Mạng máy
+    tính sẽ bị coi là trùng khi giảng viên môn An toàn thông tin muốn thêm nó
+    vào môn của mình — họ không import được dù câu hỏi hoàn toàn hợp lệ với môn.
+
+    Vẫn quét ở tầng ứng dụng (không thêm unique index) vì phạm vi đã thu hẹp
+    còn một môn, đủ nhanh với quy mô ngân hàng của một trường.
     """
-    existing = {content_fingerprint(c) for (c,) in db.query(Question.content).all()}
+    existing = {
+        content_fingerprint(c)
+        for (c,) in db.query(Question.content).filter(
+            Question.subject_id == subject_id
+        ).all()
+    }
     return {content_fingerprint(q.content) for q in questions} & existing
 
 
@@ -80,7 +91,7 @@ def preview_import(
 
     result = parse_docx(file_bytes)
 
-    duplicates = find_existing_fingerprints(db, result.questions)
+    duplicates = find_existing_fingerprints(db, result.questions, subject_id)
     # Lọc bỏ câu trùng khỏi danh sách sẽ import
     unique_questions = [q for q in result.questions if content_fingerprint(q.content) not in duplicates]
 
@@ -122,7 +133,15 @@ def commit_import(db: Session, token: str, subject_id: int) -> Tuple[int, int]:
         raise ValueError("Phiên đọc thử đã hết hạn hoặc không tồn tại. Hãy tải lại file.")
 
     questions: List[ParsedQuestion] = payload["questions"]
-    existing = {content_fingerprint(c) for (c,) in db.query(Question.content).all()}
+    # Kiểm tra trùng trong CÙNG MÔN đích (xem find_existing_fingerprints).
+    # Dùng subject_id của tham số (môn GV chọn lúc bấm Import) chứ không phải
+    # của preview, vì GV có thể đổi môn giữa bước đọc thử và bước ghi.
+    existing = {
+        content_fingerprint(c)
+        for (c,) in db.query(Question.content).filter(
+            Question.subject_id == subject_id
+        ).all()
+    }
 
     imported = 0
     # Số câu đã bị loại ở bước đọc thử + số câu mới bị trùng phát sinh giữa

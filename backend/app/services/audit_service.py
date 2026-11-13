@@ -36,6 +36,8 @@ ACTIONS = {
     "QUESTION_UPDATE": "Sửa câu hỏi",
     "QUESTION_DELETE": "Xoá câu hỏi",
     "FORCE_SUBMIT": "Giám thị thu bài",
+    "DEVICE_REVOKE": "Thu hồi thiết bị",
+    "DEVICE_UNREVOKE": "Mở khoá thiết bị",
 }
 
 

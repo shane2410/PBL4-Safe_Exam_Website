@@ -16,6 +16,10 @@ export function getSocket() {
     transports: ['websocket', 'polling'],
     autoConnect: false,
     withCredentials: true,
+    // Server từ chối handshake nếu thiếu JWT hợp lệ (xem socket_auth.py).
+    // Dùng callback để mỗi lần reconnect đều đọc token MỚI NHẤT — token có
+    // thể vừa được làm mới sau khi socket đã được tạo.
+    auth: (cb) => cb({ token: localStorage.getItem('access_token') || '' }),
   })
 
   // PHẢI gọi connect() thủ công vì autoConnect đang tắt.

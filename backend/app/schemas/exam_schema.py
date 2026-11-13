@@ -60,6 +60,11 @@ class ExamResponse(BaseModel):
 class ExamDetailResponse(ExamResponse):
     exam_questions: List[ExamQuestionResponse] = []
     security_config: Optional[ExamSecurityConfig] = None
+    # Cờ CẤP HỆ THỐNG, chỉ đọc. Teacher cần biết nó để hiển thị đúng trạng
+    # thái "cấu hình này có hiệu lực chưa" trong ExamEditor. Trước đây frontend
+    # gọi /admin/settings (chỉ ADMIN) nên giáo viên luôn nhận 403 và không mở
+    # được trang sửa đề.
+    require_safe_browser_global: bool = False
 
 # --- Exam Schedule Schemas ---
 class ExamScheduleCreate(BaseModel):

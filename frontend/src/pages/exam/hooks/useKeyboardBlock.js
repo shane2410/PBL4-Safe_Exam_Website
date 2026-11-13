@@ -7,60 +7,104 @@ import { useEffect } from 'react'
  * GHI NHẬN ĐẶC BIỆT: đây là cơ chế ngăn chặn mạnh nhất mà lớp A web có,
  * vì sự kiện thật sự đến từ trình duyệt nên `preventDefault()` có tác dụng.
  *
+ * MỖI CỜ POLICY PHẢI TẮT ĐỘC LẬP.
+ *
+ * Trước đây hook chỉ nhận một tham số `enabled` gộp chung
+ * (`block_copy_paste || block_devtools`), nên giảng viên tắt
+ * `block_copy_paste` mà vẫn bật `block_devtools` thì Ctrl+C/V vẫn bị chặn và
+ * vẫn bị tính lỗi COPY_PASTE_ATTEMPT. Ngược lại `disable_print` không hề được
+ * truyền vào, nên Ctrl+P luôn bị chặn bất kể cấu hình.
+ *
  * Lưu ý: chỉ chặn được trong phạm vi tab. Thí sinh vẫn có thể dùng phần mềm
  * chụp màn hình hoặc thiết bị khác ở tầng hệ điều hành — ngoài phạm vi kỹ thuật
  * của lớp web (xem docs/BAOCAO_LIMITATION.md, skills.md Quy tắc #5).
  */
-const BLOCKED_COMBINATIONS = [
-  { ctrl: true, key: 'c', event: 'COPY_PASTE_ATTEMPT' },
-  { ctrl: true, key: 'v', event: 'COPY_PASTE_ATTEMPT' },
-  { ctrl: true, key: 'x', event: 'COPY_PASTE_ATTEMPT' },
-  { ctrl: true, key: 'a', event: 'COPY_PASTE_ATTEMPT' }, // ctrl+A để chọn tất cả rồi copy
-  { ctrl: true, key: 'p', event: null }, // in — chặn im lặng
-  { ctrl: true, key: 's', event: null }, // lưu trang
-  { ctrl: true, key: 'u', event: null }, // view-source
-  { ctrl: true, shift: true, key: 'i', event: 'DEVTOOLS_DETECTED' },
-  { ctrl: true, shift: true, key: 'j', event: 'DEVTOOLS_DETECTED' },
-  { ctrl: true, shift: true, key: 'c', event: 'DEVTOOLS_DETECTED' },
+
+/** Ctrl/Cmd + phím tắt liên quan sao chép nội dung. */
+const COPY_PASTE_COMBINATIONS = [
+  { ctrl: true, key: 'c' },
+  { ctrl: true, key: 'v' },
+  { ctrl: true, key: 'x' },
+  { ctrl: true, key: 'a' }, // ctrl+A để chọn tất cả rồi copy
 ]
 
-export function useKeyboardBlock({ enabled, logViolation }) {
+/** Ctrl/Cmd + phím tắt mở công cụ phát triển. */
+const DEVTOOLS_COMBINATIONS = [
+  { ctrl: true, shift: true, key: 'i' },
+  { ctrl: true, shift: true, key: 'j' },
+  { ctrl: true, shift: true, key: 'c' },
+]
+
+/** Ctrl/Cmd + phím tắt in / lưu trang / xem source. */
+const PRINT_COMBINATIONS = [
+  { ctrl: true, key: 'p' }, // in
+  { ctrl: true, key: 's' }, // lưu trang
+  { ctrl: true, key: 'u' }, // view-source
+]
+
+function matches(combo, e, key) {
+  return (
+    combo.ctrl === (e.ctrlKey || e.metaKey) &&
+    Boolean(combo.shift) === e.shiftKey &&
+    combo.key === key
+  )
+}
+
+/**
+ * @param {object}  options
+ * @param {boolean} options.blockCopyPaste - chặn Ctrl+C/V/X/A, chuột phải, kéo thả
+ * @param {boolean} options.blockDevTools  - chặn F12 và Ctrl+Shift+I/J/C
+ * @param {boolean} options.disablePrint   - chặn Ctrl+P, Ctrl+S, Ctrl+U
+ * @param {Function} options.logViolation  - báo vi phạm lên server
+ */
+export function useKeyboardBlock({
+  blockCopyPaste = false,
+  blockDevTools = false,
+  disablePrint = false,
+  logViolation,
+}) {
   useEffect(() => {
-    if (!enabled) return undefined
+    if (!blockCopyPaste && !blockDevTools && !disablePrint) return undefined
 
     const onKeyDown = (e) => {
       const key = (e.key || '').toLowerCase()
 
-      // F12
-      if (key === 'f12') {
+      if (blockDevTools) {
+        if (key === 'f12') {
+          e.preventDefault()
+          logViolation?.('DEVTOOLS_DETECTED', { key: 'F12' })
+          return
+        }
+        if (DEVTOOLS_COMBINATIONS.some((c) => matches(c, e, key))) {
+          e.preventDefault()
+          logViolation?.('DEVTOOLS_DETECTED', { key: e.key })
+          return
+        }
+      }
+
+      if (blockCopyPaste && COPY_PASTE_COMBINATIONS.some((c) => matches(c, e, key))) {
         e.preventDefault()
-        logViolation?.('DEVTOOLS_DETECTED', { key: 'F12' })
+        logViolation?.('COPY_PASTE_ATTEMPT', { key: e.key })
         return
       }
 
-      const matched = BLOCKED_COMBINATIONS.find(
-        (combo) =>
-          combo.ctrl === (e.ctrlKey || e.metaKey) &&
-          Boolean(combo.shift) === e.shiftKey &&
-          combo.key === key,
-      )
-
-      if (matched) {
+      // In/lưu/xem-source chỉ CHẶN mà không ghi log — không phải hành vi gian lận.
+      if (disablePrint && PRINT_COMBINATIONS.some((c) => matches(c, e, key))) {
         e.preventDefault()
-        // Chỉ ghi log với event có ý nghĩa về gian lận; thao tác in/lưu/xem-source
-        // chỉ chặn mà không ghi log để tránh làm nhiễu báo cáo vi phạm.
-        if (matched.event) {
-          logViolation?.(matched.event, { key: e.key })
-        }
       }
     }
 
+    // Chuột phải và kéo-thả là đường lấy nội dung, nên đi theo cờ copy/paste.
     const onContextMenu = (e) => {
+      if (!blockCopyPaste) return
       e.preventDefault()
       logViolation?.('RIGHT_CLICK_ATTEMPT', {})
     }
 
-    const onDragStart = (e) => e.preventDefault()
+    const onDragStart = (e) => {
+      if (!blockCopyPaste) return
+      e.preventDefault()
+    }
 
     document.addEventListener('keydown', onKeyDown, true)
     document.addEventListener('contextmenu', onContextMenu)
@@ -71,7 +115,7 @@ export function useKeyboardBlock({ enabled, logViolation }) {
       document.removeEventListener('contextmenu', onContextMenu)
       document.removeEventListener('dragstart', onDragStart)
     }
-  }, [enabled, logViolation])
+  }, [blockCopyPaste, blockDevTools, disablePrint, logViolation])
 
   return {}
 }

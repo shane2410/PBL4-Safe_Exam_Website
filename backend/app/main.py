@@ -32,6 +32,7 @@ from app.sockets.socket_server import sio
 from app.sockets.exam_namespace import register_exam_socket_handlers, active_sockets
 from app.sockets.monitor_namespace import register_monitor_socket_handlers
 from app.services.heartbeat_monitor import start_heartbeat_monitor
+from app.services.deadline_sweeper import start_deadline_sweeper
 
 # Initialize FastAPI app
 fastapi_app = FastAPI(
@@ -82,19 +83,28 @@ register_monitor_socket_handlers()
 # Vòng quét heartbeat nền: phát hiện thí sinh mất kết nối giữa kỳ thi.
 # Trước đây HEARTBEAT_TIMEOUT_SECONDS có trong config nhưng không được dùng ở đâu.
 _HEARTBEAT_TASK = None
+# Vòng quét phiên quá hạn: tự nộp bài khi client không tự nộp (đóng tab,
+# mất mạng, tắt SEB Client). Nếu không có, phiên kẹt IN_PROGRESS và không
+# bao giờ được chấm điểm.
+_DEADLINE_TASK = None
 
 @fastapi_app.on_event("startup")
 async def _start_background_tasks():
-    global _HEARTBEAT_TASK
+    global _HEARTBEAT_TASK, _DEADLINE_TASK
     _HEARTBEAT_TASK = start_heartbeat_monitor(active_sockets, sio)
     logger.info("Đã khởi động vòng quét heartbeat")
+    _DEADLINE_TASK = start_deadline_sweeper()
+    logger.info("Đã khởi động vòng quét phiên quá hạn")
 
 @fastapi_app.on_event("shutdown")
 async def _stop_background_tasks():
-    global _HEARTBEAT_TASK
+    global _HEARTBEAT_TASK, _DEADLINE_TASK
     if _HEARTBEAT_TASK:
         _HEARTBEAT_TASK.cancel()
         logger.info("Đã dừng vòng quét heartbeat")
+    if _DEADLINE_TASK:
+        _DEADLINE_TASK.cancel()
+        logger.info("Đã dừng vòng quét phiên quá hạn")
 
 # Wrap FastAPI with Socket.IO ASGIApp
 # This ensures that both REST API endpoints and Socket.IO WebSocket connections run on the same port seamlessly
