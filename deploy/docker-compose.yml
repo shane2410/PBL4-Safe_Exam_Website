@@ -1,0 +1,94 @@
+# ==============================================================================
+# Docker Compose - Hệ thống Thi trắc nghiệm trực tuyến An toàn (Safe Exam System)
+# Bao gồm 3 dịch vụ: db (MySQL 8.0), backend (FastAPI), web (React SPA + Nginx)
+# ==============================================================================
+
+services:
+  # ----------------------------------------------------------------------------
+  # 1. Cơ sở dữ liệu MySQL 8.0
+  # ----------------------------------------------------------------------------
+  db:
+    image: mysql:8.0
+    container_name: exam_db
+    restart: unless-stopped
+    command: >
+      --default-time-zone=+00:00
+      --character-set-server=utf8mb4
+      --collation-server=utf8mb4_unicode_ci
+    environment:
+      MYSQL_ROOT_PASSWORD: ${MYSQL_ROOT_PASSWORD:-exam_secure_root_password_2026}
+      MYSQL_DATABASE: ${MYSQL_DATABASE:-secure_exam_db}
+      TZ: UTC
+    volumes:
+      - mysql_data:/var/lib/mysql
+    ports:
+      # Mặc định chỉ bind 127.0.0.1 để quản trị nội bộ an toàn (không mở ra public internet)
+      - "${MYSQL_BIND_IP:-127.0.0.1}:${MYSQL_PORT:-3306}:3306"
+    networks:
+      - exam_network
+    healthcheck:
+      test: ["CMD-SHELL", "mysqladmin ping -h localhost -uroot -p$${MYSQL_ROOT_PASSWORD} --silent"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 25s
+
+  # ----------------------------------------------------------------------------
+  # 2. Backend API FastAPI & Socket.IO
+  # ----------------------------------------------------------------------------
+  backend:
+    build:
+      context: ..
+      dockerfile: deploy/Dockerfile
+    container_name: exam_backend
+    restart: unless-stopped
+    depends_on:
+      db:
+        condition: service_healthy
+    environment:
+      # Kết nối CSDL MySQL qua tên service "db" trong mạng nội bộ docker
+      DATABASE_URL: mysql+pymysql://root:${MYSQL_ROOT_PASSWORD:-exam_secure_root_password_2026}@db:3306/${MYSQL_DATABASE:-secure_exam_db}?charset=utf8mb4
+      SECRET_KEY: ${SECRET_KEY:-c926a84efc71b3053894765d7967b2d5f2a1b94d9e03c4f7a6b8e1d2c3e4f5a6}
+      ENV: ${ENV:-production}
+      DEBUG: ${DEBUG:-false}
+      TZ: UTC
+      CORS_ORIGINS: ${CORS_ORIGINS:-["http://localhost", "https://localhost", "http://127.0.0.1"]}
+      ACCESS_TOKEN_EXPIRE_MINUTES: ${ACCESS_TOKEN_EXPIRE_MINUTES:-480}
+      DEFAULT_MAX_VIOLATION_ALLOWED: ${DEFAULT_MAX_VIOLATION_ALLOWED:-5}
+      HEARTBEAT_INTERVAL_SECONDS: ${HEARTBEAT_INTERVAL_SECONDS:-10}
+      HEARTBEAT_TIMEOUT_SECONDS: ${HEARTBEAT_TIMEOUT_SECONDS:-30}
+      CLIENT_NONCE_TTL_SECONDS: ${CLIENT_NONCE_TTL_SECONDS:-30}
+      # Cờ tự động seed dữ liệu mẫu khi khởi tạo lần đầu (true/false)
+      AUTO_SEED: ${AUTO_SEED:-true}
+    expose:
+      - "8000"
+    networks:
+      - exam_network
+
+  # ----------------------------------------------------------------------------
+  # 3. Web Frontend (React Vite + Nginx Reverse Proxy)
+  # ----------------------------------------------------------------------------
+  web:
+    build:
+      context: ..
+      dockerfile: deploy/Dockerfile.frontend
+    container_name: exam_web
+    restart: unless-stopped
+    depends_on:
+      - backend
+    ports:
+      - "${PORT_HTTP:-80}:80"
+      - "${PORT_HTTPS:-443}:443"
+    networks:
+      - exam_network
+
+# ------------------------------------------------------------------------------
+# Volumes & Networks
+# ------------------------------------------------------------------------------
+volumes:
+  mysql_data:
+    driver: local
+
+networks:
+  exam_network:
+    driver: bridge

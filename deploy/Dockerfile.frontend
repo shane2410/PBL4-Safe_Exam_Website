@@ -1,0 +1,48 @@
+# ==============================================================================
+# Dockerfile cho Frontend React SPA + Nginx Reverse Proxy
+# Multi-stage build để tối ưu dung lượng image sản phẩm
+# ==============================================================================
+
+# ------------------------------------------------------------------------------
+# Stage 1: Build source code React + Vite
+# ------------------------------------------------------------------------------
+FROM node:18-alpine AS builder
+
+WORKDIR /app
+
+# Khai báo các build arguments cho Vite (nếu muốn cấu hình cứng khi build)
+ARG VITE_API_URL=""
+ARG VITE_SOCKET_URL=""
+ENV VITE_API_URL=$VITE_API_URL \
+    VITE_SOCKET_URL=$VITE_SOCKET_URL
+
+# Copy manifest để tận dụng Docker layer cache khi cài npm dependencies
+COPY frontend/package*.json ./
+
+RUN npm ci --prefer-offline --no-audit || npm install --no-audit
+
+# Copy toàn bộ mã nguồn frontend
+COPY frontend/ ./
+
+# Biên dịch ứng dụng React thành static bundle tại /app/dist
+RUN npm run build
+
+# ------------------------------------------------------------------------------
+# Stage 2: Phục vụ file tĩnh và Reverse Proxy bằng Nginx Alpine
+# ------------------------------------------------------------------------------
+FROM nginx:alpine
+
+# Xóa cấu hình mặc định của Nginx và thay thế bằng cấu hình của dự án
+RUN rm -f /etc/nginx/conf.d/default.conf
+
+# Sao chép file build từ stage builder sang thư mục web root của Nginx
+COPY --from=builder /app/dist /usr/share/nginx/html
+
+# Sao chép cấu hình Nginx reverse proxy (SPA fallback, /api, /socket.io)
+COPY deploy/nginx.conf /etc/nginx/conf.d/default.conf
+
+# Mở cổng HTTP tiêu chuẩn
+EXPOSE 80
+
+# Chạy Nginx foreground
+CMD ["nginx", "-g", "daemon off;"]

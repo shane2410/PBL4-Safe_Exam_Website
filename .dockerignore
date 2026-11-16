@@ -1,0 +1,50 @@
+# Version Control
+.git
+.gitignore
+
+# Documentation and design
+docs/
+*.md
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+env/
+venv/
+.venv/
+.pytest_cache/
+.coverage
+htmlcov/
+backend/tests/
+backend/venv/
+backend/.venv/
+
+# Node / Frontend
+frontend/node_modules/
+frontend/dist/
+frontend/.vite/
+node_modules/
+dist/
+
+# SEB Client desktop app (not needed in web/backend container)
+seb_client/
+
+# IDE and OS files
+.idea/
+.vscode/
+.opencode/
+.DS_Store
+Thumbs.db
+*.swp
+*.swo
+
+# Local secrets & artifacts
+.env
+.env.*
+!.env.example
+*.seb
+*.seb2
+graphify-out/
