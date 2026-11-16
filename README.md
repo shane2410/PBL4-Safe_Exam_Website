@@ -146,6 +146,55 @@ npm run dev
 Mở <http://localhost:5173>. Dev server đã cấu hình proxy `/api` và `/socket.io`
 về backend ở port 8000.
 
+### 4.5. Chạy SEB Client (Desktop)
+
+Safe Exam Browser Client (Lớp B) được viết bằng Python + PySide6 (Qt WebEngine) để chạy trực tiếp trên máy thí sinh với cơ chế khóa màn hình, chặn phím tắt và xác thực thiết bị (Ed25519 challenge-response).
+
+```bash
+cd seb_client
+
+# Tạo môi trường ảo riêng và cài thư viện
+python -m venv .venv
+source .venv/bin/activate          # Windows: .venv\Scripts\activate
+pip install -r requirements.txt
+
+# Cấu hình biến môi trường
+cp .env.example .env
+
+# Khởi chạy ứng dụng
+python main.py
+```
+
+> **Các biến môi trường cần thiết (`.env`):**
+> - `SEB_BACKEND_URL`: URL của backend FastAPI (mặc định: `http://127.0.0.1:8000`).
+> - `SEB_EXAM_URL_TEMPLATE`: URL mẫu nạp trang thi khi vào phòng, bắt buộc chứa tham số `{room_code}` và cờ `embedded=1` (mặc định: `http://localhost:5173/exam/room?room={room_code}&embedded=1`).
+>   - *Lưu ý quan trọng:* Tham số `embedded=1` yêu cầu trang web nhường kết nối Socket.IO cho SEB Client. Nếu thiếu, cả web và desktop sẽ cùng mở socket gây xung đột `DUPLICATE_LOGIN` và bị cưỡng chế thu bài.
+> - `SEB_EXAM_ORIGIN`: Domain gốc của trang thi được phép tải (mặc định: `http://localhost:5173`).
+> - `SEB_ALLOWED_ORIGINS`: Danh sách domain phân tách bằng dấu phẩy mà `QWebEngineView` được phép chuyển hướng. Bất kỳ URL ngoài danh sách này đều bị `NavigationGuard` chặn.
+> - `SEB_LOG_LEVEL`: Mức độ chi tiết log (`DEBUG` | `INFO` | `WARNING` | `ERROR`). File log được lưu tự động tại thư mục `logs/`.
+> - `SEB_HEARTBEAT_INTERVAL`: Khoảng cách gửi nhịp tim định kỳ lên server (mặc định: `10` giây, không nên đặt quá 20s vì server timeout sau 30s).
+> - `SEB_HEADLESS`: Đặt `true` khi chạy trong môi trường CI không có giao diện hiển thị (`false` khi thi thật).
+
+### 4.6. Đóng gói SEB Client
+
+Bản phân phối độc lập (`onedir`) đóng gói sẵn PySide6, Chromium runtime và các dependencies, cho phép người dùng chạy ngay mà không cần cài đặt Python.
+
+Chi tiết quy trình xem tại: [`seb_client/packaging/HUONG_DAN_DONG_GOI.md`](seb_client/packaging/HUONG_DAN_DONG_GOI.md).
+
+```bash
+cd seb_client
+
+# Đóng gói cho Linux:
+./packaging/build.sh linux
+#   → Kết quả: dist/SEB-Client/SEB-Client
+
+# Đóng gói cho Windows (qua Wine hoặc chạy trực tiếp trên Windows):
+./packaging/build.sh windows
+#   → Kết quả: dist-win/SEB-Client/SEB-Client.exe
+```
+
+Khi chạy bản đóng gói, chỉ cần copy thư mục ra máy trạm, tạo file `.env` cạnh file thực thi và mở `./SEB-Client` (hoặc `SEB-Client.exe`).
+
 ---
 
 ## 5. Tài khoản mẫu
@@ -185,14 +234,14 @@ Mã phòng thi mẫu: **`PBL4-EXAM-01`**
 │   │   ├── api/routers/     # FastAPI routers (chỉ điều phối request)
 │   │   ├── core/            # Config, security, database
 │   │   ├── dependencies/    # get_current_user, require_role, client_identity
-│   │   ├── models/          # SQLAlchemy ORM models
+│   │   ├── models/          # SQLAlchemy ORM models (16 bảng)
 │   │   ├── schemas/         # Pydantic DTO
 │   │   ├── services/        # TOÀN BỘ business logic
 │   │   ├── sockets/         # Socket.IO handlers
 │   │   └── main.py
 │   ├── alembic/versions/    # Database migrations
 │   ├── seeders/             # Script tạo dữ liệu mẫu
-│   ├── tests/               # pytest
+│   ├── tests/               # pytest (75+ test không phụ thuộc MySQL)
 │   └── requirements.txt
 ├── frontend/
 │   └── src/
@@ -206,22 +255,76 @@ Mã phòng thi mẫu: **`PBL4-EXAM-01`**
 │       │   └── monitor/     # Dashboard giám sát thời gian thực
 │       ├── services/        # apiClient, socketClient, policyService, teacherService
 │       └── store/           # Zustand
+├── seb_client/              # Lớp B: Safe Exam Browser Client (Desktop)
+│   ├── sebclient/
+│   │   ├── api/             # Client API (attestation Ed25519, heartbeat)
+│   │   ├── guards/          # 7 guard chặn cấp OS & trình duyệt
+│   │   ├── osint/           # Adapter đa nền tảng (Windows, macOS, Linux X11/Wayland)
+│   │   └── ui/              # PySide6 + QtWebEngine nhúng web app
+│   ├── packaging/           # Script và spec đóng gói PyInstaller / Nuitka
+│   ├── tests/               # pytest cho SEB Client
+│   └── requirements.txt
 └── docs/
-    ├── PLAN.md              # Kế hoạch triển khai chi tiết
-    ├── BAOCAO_LIMITATION.md # Mục giới hạn kỹ thuật (BẮT BUỘC trình bày)
-    └── SRS_He_thong_thi_truc_tuyen_v2.docx
+    ├── ERD.md               # Sơ đồ thực thể liên kết chi tiết 16 bảng + Phase 2
+    ├── PLAN.md              # Kế hoạch triển khai chi tiết & ma trận đe dọa
+    ├── BAOCAO_LIMITATION.md # Báo cáo giới hạn kỹ thuật (BẮT BUỘC trình bày)
+    ├── SRS_v3_summary.md    # Tóm tắt đặc tả yêu cầu SRS v3 (Web vs SEB)
+    ├── KIEN_TRUC_VA_NGHIEP_VU.md # Kiến trúc và nghiệp vụ toàn hệ thống
+    ├── SEB_GATE_DESIGN.md   # Thiết kế cổng bắt buộc SEB
+    ├── SEB_CLIENT_SPEC.md   # Đặc tả đối chiếu cấu hình client
+    └── deploy/              # Hướng dẫn triển khai Docker và Production Nginx
 ```
 
 ---
 
-## 8. Kiểm thử
+## 8. Chạy test (Kiểm thử)
+
+Hệ thống cung cấp bộ kiểm thử tự động toàn diện cho cả Backend và SEB Client bằng `pytest`.
+
+### 8.1. Kiểm thử Backend
+
+Bộ kiểm thử backend sử dụng SQLite in-memory, có thể chạy độc lập mà không cần kết nối tới MySQL.
 
 ```bash
-# Backend — 75 test, không cần MySQL (dùng SQLite in-memory)
-cd backend && .venv/bin/python -m pytest tests/ --ignore=tests/test_api.py -v
+cd backend
 
-# Frontend — lint và build
-cd frontend && npm run lint && npm run build
+# Kích hoạt venv (nếu chưa)
+source .venv/bin/activate          # Windows: .venv\Scripts\activate
+
+# Cài đặt thư viện phụ thuộc (nếu chưa)
+pip install -r requirements.txt
+
+# Chạy test suite backend
+pytest tests/ --ignore=tests/test_api.py -v
+```
+
+> *Ghi chú:* Bỏ qua `test_api.py` khi chạy với SQLite in-memory vì file này kiểm thử tích hợp trực tiếp với cơ sở dữ liệu MySQL thật.
+
+### 8.2. Kiểm thử SEB Client
+
+Bộ kiểm thử SEB Client kiểm tra tính tương thích của các Guard, cơ chế tính toán hash cấu hình, Keystore và chữ ký Ed25519.
+
+```bash
+cd seb_client
+
+# Kích hoạt venv (nếu chưa)
+source .venv/bin/activate          # Windows: .venv\Scripts\activate
+
+# Cài đặt thư viện phụ thuộc
+pip install -r requirements.txt
+
+# Chạy test suite SEB Client
+pytest tests/ -v
+```
+
+### 8.3. Kiểm thử Frontend
+
+```bash
+cd frontend
+
+# Kiểm tra cú pháp (lint) và biên dịch kiểm tra lỗi kiểu dữ liệu
+npm run lint
+npm run build
 ```
 
 ---
@@ -230,11 +333,16 @@ cd frontend && npm run lint && npm run build
 
 | Tài liệu | Nội dung |
 |---|---|
-| [`docs/BAOCAO_LIMITATION.md`](docs/BAOCAO_LIMITATION.md) | **Giới hạn kỹ thuật — bắt buộc trình bày** |
-| [`docs/PLAN.md`](docs/PLAN.md) | Kế hoạch triển khai, kiến trúc, mô hình đe doạ |
-| `skills.md` | Quy tắc bắt buộc cho dự án (kiến trúc, đặc tên, UI) |
-| `design.md` | Design system tham khảo lịch sử (giao diện hiện tại dùng token trong `tailwind.config.js`) |
-| `SRS_He_thong_thi_truc_tuyen_v2.docx` | Đặc tả yêu cầu (phiên bản 2) |
+| [`docs/ERD.md`](docs/ERD.md) | **Sơ đồ ERD & Từ điển CSDL đầy đủ (16 bảng hiện tại + Phase 2)** |
+| [`docs/BAOCAO_LIMITATION.md`](docs/BAOCAO_LIMITATION.md) | **Giới hạn kỹ thuật — BẮT BUỘC trình bày trước hội đồng** |
+| [`docs/SRS_v3_summary.md`](docs/SRS_v3_summary.md) | Tóm tắt đặc tả SRS v3 (Lớp A Web vs Lớp B Desktop, Bảng 2.2 đe dọa) |
+| [`docs/PLAN.md`](docs/PLAN.md) | Kế hoạch triển khai chi tiết, kiến trúc, mô hình đe doạ |
+| [`docs/KIEN_TRUC_VA_NGHIEP_VU.md`](docs/KIEN_TRUC_VA_NGHIEP_VU.md) | Kiến trúc toàn diện, luồng tuần tự và nghiệp vụ chi tiết |
+| [`docs/SEB_GATE_DESIGN.md`](docs/SEB_GATE_DESIGN.md) | Thiết kế cổng bắt buộc SEB (`require_safe_browser`) |
+| [`docs/SEB_CLIENT_SPEC.md`](docs/SEB_CLIENT_SPEC.md) | Đặc tả đối chiếu cấu hình và mật khẩu giám thị |
+| [`docs/deploy/DOCKER.md`](docs/deploy/DOCKER.md) | Hướng dẫn đóng gói backend bằng Docker |
+| [`docs/deploy/TRIEN_KHAI_WEB_VA_SEB.md`](docs/deploy/TRIEN_KHAI_WEB_VA_SEB.md) | Hướng dẫn triển khai Production và đồng bộ Origin |
+| `skills.md` | Quy tắc bắt buộc cho dự án (kiến trúc, đặt tên, UI) |
 
 ---
 

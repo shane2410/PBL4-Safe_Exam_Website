@@ -4,6 +4,7 @@ skills.md
 SRS_He_thong_thi_truc_tuyen_v2.docx
 *.docx
 SRS*
+!docs/SRS_v3_summary.md
 AGENTS.md
 
 # Environment & Secrets
