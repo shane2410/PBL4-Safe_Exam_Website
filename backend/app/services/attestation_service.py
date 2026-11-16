@@ -24,6 +24,7 @@ import base64
 import hashlib
 import hmac
 import logging
+import os
 import secrets
 from datetime import datetime, timedelta, timezone
 from typing import Dict, Optional, Tuple
@@ -50,7 +51,71 @@ ATTESTATION_TOKEN_TYPE = "seb_attestation"
 # Nonce đang chờ xác minh: nonce -> {user_id, expires_at}
 # Ghi chú kiến trúc: đây là store in-memory phục vụ đồ án chạy 1 tiến trình.
 # Khi chạy multi-worker phải đổi sang Redis/DB để các worker chia sẻ nonce.
+#
+# ==============================================================================
+# HƯỚNG DẪN SCALE SANG REDIS KHI CHẠY MULTI-WORKER / CLUSTER:
+#
+# Hiện tại `_pending_nonces` là một Dictionary lưu trên RAM của 1 process Python duy nhất.
+# Khi scale ứng dụng với nhiều worker Uvicorn (workers > 1) hoặc triển khai nhiều container:
+#
+# Vấn đề:
+#   Client gọi `POST /api/auth/client-nonce` trúng Worker 1 (nonce lưu trong RAM Worker 1).
+#   Client ký challenge rồi gọi `POST /api/auth/client-attest` trúng Worker 2.
+#   Worker 2 tra `_pending_nonces` không thấy -> báo lỗi "NONCE_INVALID_OR_EXPIRED".
+#
+# Giải pháp: Dùng Redis làm Distributed Nonce Store:
+# 1. Cài đặt redis:
+#      pip install redis (hoặc redis-py)
+# 2. Khởi tạo Redis client:
+#      import redis
+#      redis_client = redis.Redis.from_url(settings.REDIS_URL, decode_responses=True)
+# 3. Khi cấp nonce (issue_nonce):
+#      key = f"client_nonce:{nonce}"
+#      payload = json.dumps({"user_id": user.id})
+#      redis_client.setex(key, NONCE_TTL_SECONDS, payload)
+#      # Redis tự động expire (TTL) sau NONCE_TTL_SECONDS, không cần hàm _purge_expired_nonces.
+# 4. Khi xác minh nonce (verify_attestation / verify_ed25519_attestation):
+#      key = f"client_nonce:{data.nonce}"
+#      # Đảm bảo tính single-use (chống replay race condition) bằng lệnh nguyên tử GETDEL (Redis 6.2+):
+#      raw = redis_client.getdel(key)
+#      if not raw:
+#          return False, "NONCE_INVALID_OR_EXPIRED"
+#      pending = json.loads(raw)
+#      if pending.get("user_id") != user.id:
+#          return False, "NONCE_USER_MISMATCH"
+# 5. Lợi ích:
+#      - Tính nguyên tử tuyệt đối (atomic single-use verification).
+#      - Hoạt động nhất quán trên N workers / N máy chủ load balancer.
+#      - Tự động dọn dẹp theo TTL của Redis mà không cần dọn dẹp thủ công.
+# ==============================================================================
 _pending_nonces: Dict[str, Dict] = {}
+
+
+def check_nonce_store_workers() -> None:
+    """Cảnh báo khi chạy multi-worker nhưng nonce store vẫn dùng in-memory dictionary.
+    
+    Khi workers > 1 (Uvicorn / Gunicorn / WEB_CONCURRENCY):
+    Worker A sinh nonce challenge, nhưng client gửi response attest sang Worker B,
+    Worker B không có nonce trong memory nên xác thực sẽ thất bại (NONCE_INVALID_OR_EXPIRED).
+    """
+    workers_env = (
+        os.getenv("WEB_CONCURRENCY")
+        or os.getenv("WORKERS")
+        or os.getenv("UVICORN_WORKERS")
+    )
+    if workers_env:
+        try:
+            workers_count = int(workers_env)
+            if workers_count > 1:
+                logger.warning(
+                    "CẢNH BÁO: Ứng dụng đang cấu hình chạy với %d workers nhưng `attestation_service` "
+                    "vẫn dùng in-memory nonce store (_pending_nonces). Nonce challenge sinh ở worker này "
+                    "sẽ không tìm thấy ở worker khác khi client gửi request attest! "
+                    "Hãy chuyển sang Redis theo hướng dẫn trong `attestation_service.py` khi chạy multi-worker.",
+                    workers_count,
+                )
+        except ValueError:
+            pass
 
 
 def _purge_expired_nonces() -> None:

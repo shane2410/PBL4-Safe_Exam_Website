@@ -217,7 +217,9 @@ def test_nonce_never_stored_in_plaintext_in_db(db, seeded):
 def test_event_type_whitelist():
     assert "TAB_SWITCH" in ALLOWED_EVENT_TYPES
     assert "UNAUTHORIZED_CLIENT" in ALLOWED_EVENT_TYPES
-    assert len(ALLOWED_EVENT_TYPES) == 8
+    assert "EXIT_UNLOCK_GRANTED" in ALLOWED_EVENT_TYPES
+    assert "EXIT_UNLOCK_DENIED" in ALLOWED_EVENT_TYPES
+    assert len(ALLOWED_EVENT_TYPES) == 10
 
 
 def test_unknown_event_type_rejected():
@@ -234,3 +236,14 @@ def test_severity_resolved_server_side():
     assert resolve_severity("DEVTOOLS_DETECTED") == "HIGH"
     assert resolve_severity("TAB_SWITCH") == "LOW"
     assert resolve_severity("UNAUTHORIZED_CLIENT") == "HIGH"
+
+
+def test_nonce_store_multi_worker_warning(monkeypatch, caplog):
+    """Khi biến môi trường chỉ định workers > 1, check_nonce_store_workers log WARNING."""
+    import logging
+    from app.services.attestation_service import check_nonce_store_workers
+
+    monkeypatch.setenv("WEB_CONCURRENCY", "4")
+    with caplog.at_level(logging.WARNING):
+        check_nonce_store_workers()
+    assert any("in-memory nonce store" in record.message for record in caplog.records)

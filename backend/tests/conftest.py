@@ -1,20 +1,24 @@
-"""Fixture dùng SQLite in-memory cho test — không phụ thuộc MySQL/XAMPP.
+"""Fixture dùng SQLite in-memory cho test — không phụ thuộc MySQL/XAMPP hay file .env thật.
 
-Các test trong `test_api.py` cần MySQL thật (đã seed sẵn). File này tạo một
-engine SQLite riêng và ghi đè dependency `get_db`, nên chạy độc lập.
+Cả unit test lẫn API test (`test_api.py`) đều chạy hoàn toàn trên SQLite in-memory
+mà không cần MySQL thật đang chạy.
 """
 
 import os
 import sys
 from datetime import datetime, timedelta, timezone
 
+# Thiết lập biến môi trường trước khi bất kỳ module app nào được nạp
+os.environ.setdefault("DATABASE_URL", "sqlite:///:memory:")
+os.environ.setdefault("ENV", "development")
+
+sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
+
 import pytest
 from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker
 
-sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
-
-from app.core.database import Base, get_db  # noqa: E402
+from app.core.database import Base, engine, get_db  # noqa: E402
 import app.models  # noqa: F401,E402  (đăng ký toàn bộ model vào Base.metadata)
 from app.models.role import Role  # noqa: E402
 from app.models.user import User  # noqa: E402
@@ -26,6 +30,14 @@ from app.models.exam_question import ExamQuestion  # noqa: E402
 from app.models.exam_schedule import ExamSchedule  # noqa: E402
 from app.models.exam_session import ExamSession  # noqa: E402
 from app.core.security import get_password_hash  # noqa: E402
+from seeders.seed_data import seed  # noqa: E402
+
+# Khởi tạo bảng và seed dữ liệu mặc định cho engine chung (dùng bởi TestClient / test_api.py)
+Base.metadata.create_all(bind=engine)
+try:
+    seed()
+except Exception:
+    pass
 
 
 @pytest.fixture()

@@ -98,6 +98,12 @@ class ExamSessionService:
         is_verified_seb = claims_seb and identity.attested
         restricted_mode = seb_required and not is_verified_seb
 
+        if seb_required and not identity.attested and not policy.allow_web_fallback:
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail="Kỳ thi yêu cầu sử dụng Safe Exam Browser và không cho phép làm bài qua trình duyệt web thông thường",
+            )
+
         # Check existing session
         session = db.query(ExamSession).filter(
             ExamSession.schedule_id == schedule.id,

@@ -119,6 +119,76 @@ def test_counted_violations_trigger_threshold(db, seeded):
     assert session.tab_switch_count + session.fullscreen_exit_count == 8
 
 
+def test_connection_lost_does_not_consume_violation_budget(db, seeded):
+    """CONNECTION_LOST chỉ cảnh báo GV, không trừ vào ngân sách vi phạm để tự nộp bài."""
+    exam = seeded["exam"]
+    exam.max_violation_allowed = 2
+    db.commit()
+
+    state = _join(db, seeded)
+    # Thí sinh rớt mạng 10 lần trong ca thi
+    for _ in range(10):
+        _, exceeded = AnticheatService.record_violation(
+            db, state.session_id, _violation("CONNECTION_LOST")
+        )
+        assert exceeded is False, "CONNECTION_LOST không được kích hoạt auto-submit"
+
+    session = db.query(ExamSession).filter(ExamSession.id == state.session_id).first()
+    db.refresh(session)
+    assert session.status == "IN_PROGRESS"
+    assert session.tab_switch_count == 0
+    assert session.fullscreen_exit_count == 0
+    # risk_score tăng để GV thấy cảnh báo (5 * 10 = 50)
+    assert session.risk_score == 50
+    # Phép đếm total_violations loại bỏ AUDIT_ONLY_EVENT_TYPES
+    assert AnticheatService.get_total_violations(db, state.session_id) == 0
+
+
+def test_audit_only_events_do_not_consume_violation_budget(db, seeded):
+    """Sự kiện kiểm toán (EXIT_UNLOCK_*) không ăn vào ngân sách vi phạm của thí sinh."""
+    from app.services.anticheat_service import AUDIT_ONLY_EVENT_TYPES
+
+    assert "CONNECTION_LOST" in AUDIT_ONLY_EVENT_TYPES
+    assert "EXIT_UNLOCK_GRANTED" in AUDIT_ONLY_EVENT_TYPES
+    assert "EXIT_UNLOCK_DENIED" in AUDIT_ONLY_EVENT_TYPES
+
+    exam = seeded["exam"]
+    exam.max_violation_allowed = 2
+    db.commit()
+
+    state = _join(db, seeded)
+    # Thoát hợp lệ 8 lần (GV nhập mật khẩu)
+    for _ in range(8):
+        _, exceeded = AnticheatService.record_violation(
+            db, state.session_id, _violation("EXIT_UNLOCK_GRANTED")
+        )
+        assert exceeded is False
+
+    # Thử sai mật khẩu 4 lần
+    for _ in range(4):
+        _, exceeded = AnticheatService.record_violation(
+            db, state.session_id, _violation("EXIT_UNLOCK_DENIED")
+        )
+        assert exceeded is False
+
+    assert AnticheatService.get_total_violations(db, state.session_id) == 0
+
+    session = db.query(ExamSession).filter(ExamSession.id == state.session_id).first()
+    db.refresh(session)
+    assert session.status == "IN_PROGRESS"
+
+    # Bây giờ thí sinh vi phạm thật (TAB_SWITCH 2 lần -> chạm ngưỡng 2)
+    _, exceeded1 = AnticheatService.record_violation(
+        db, state.session_id, _violation("TAB_SWITCH")
+    )
+    assert exceeded1 is False
+
+    _, exceeded2 = AnticheatService.record_violation(
+        db, state.session_id, _violation("TAB_SWITCH")
+    )
+    assert exceeded2 is True
+
+
 # --- A4: exams.max_violation_allowed được tôn trọng ---
 
 def test_exam_max_violation_allowed_is_used(db, seeded):
