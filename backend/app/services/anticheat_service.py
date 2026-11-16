@@ -24,12 +24,31 @@ RISK_WEIGHTS = {
     "DUPLICATE_LOGIN": 25,
     "CONNECTION_LOST": 5,
     "UNAUTHORIZED_CLIENT": 20,
+    "EXIT_UNLOCK_GRANTED": 0,
+    "EXIT_UNLOCK_DENIED": 25,
 }
 
 MAX_RISK_SCORE = 1000
 
+# Tập hợp các loại sự kiện chỉ mang tính chất kiểm toán (audit-only) hoặc cảnh báo kỹ thuật/hạ tầng.
+# Các sự kiện này TUYỆT ĐỐI KHÔNG tính vào ngưỡng vi phạm (violation budget) để tự nộp bài:
+# - CONNECTION_LOST: lỗi mạng/hạ tầng, chỉ cảnh báo GV, không phạt quota vi phạm của thí sinh.
+# - EXIT_UNLOCK_*: sự kiện kiểm toán giám thị mở khóa cho thí sinh thoát phòng thi hợp lệ / thử sai.
+AUDIT_ONLY_EVENT_TYPES = {
+    "CONNECTION_LOST",
+    "EXIT_UNLOCK_GRANTED",
+    "EXIT_UNLOCK_DENIED",
+}
+
 
 class AnticheatService:
+    @staticmethod
+    def get_total_violations(db: Session, session_id: int) -> int:
+        """Đếm số vi phạm thuộc diện tính ngưỡng của một phiên (lọc bỏ AUDIT_ONLY_EVENT_TYPES ở tầng DB)."""
+        return db.query(ViolationLog).filter(
+            ViolationLog.session_id == session_id,
+            ~ViolationLog.event_type.in_(AUDIT_ONLY_EVENT_TYPES)
+        ).count()
     @staticmethod
     def resolve_max_violations_for_exam(db: Session, exam) -> int:
         """Ngưỡng vi phạm cho một đề thi, theo đúng thứ tự ưu tiên đã tài liệu hoá.
@@ -100,11 +119,14 @@ class AnticheatService:
             weight = RISK_WEIGHTS.get(v_data.event_type, 10)
             session.risk_score = min(session.risk_score + weight, MAX_RISK_SCORE)
 
-            # Đếm số vi phạm THUỘC DIỆN TÍNH NGƯỠNG (tab switch + fullscreen exit).
-            # Trước đây đếm TẤT CẢ ViolationLog, nên DEVTOOLS_DETECTED,
-            # COPY_PASTE_ATTEMPT, RIGHT_CLICK_ATTEMPT, CONNECTION_LOST,
-            # DUPLICATE_LOGIN... cũng ăn vào quota chuyển tab -> tự nộp sớm hơn
-            # cấu hình, lệch với bộ đếm hiển thị cho thí sinh.
+            # Đếm số vi phạm THUỘC DIỆN TÍNH NGƯỠNG ở tầng DB, loại bỏ AUDIT_ONLY_EVENT_TYPES.
+            # CONNECTION_LOST và các sự kiện kiểm toán chỉ cảnh báo GV, không cắt ngân sách vi phạm.
+            total_violations = db.query(ViolationLog).filter(
+                ViolationLog.session_id == session_id,
+                ~ViolationLog.event_type.in_(AUDIT_ONLY_EVENT_TYPES)
+            ).count()
+
+            # Bộ đếm vi phạm tính ngưỡng theo hành vi (tab switch + fullscreen exit)
             counted_violations = session.tab_switch_count + session.fullscreen_exit_count
 
             max_allowed = AnticheatService.resolve_max_violations(db, session)

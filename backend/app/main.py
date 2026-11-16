@@ -91,6 +91,8 @@ _DEADLINE_TASK = None
 @fastapi_app.on_event("startup")
 async def _start_background_tasks():
     global _HEARTBEAT_TASK, _DEADLINE_TASK
+    from app.services.attestation_service import check_nonce_store_workers
+    check_nonce_store_workers()
     _HEARTBEAT_TASK = start_heartbeat_monitor(active_sockets, sio)
     logger.info("Đã khởi động vòng quét heartbeat")
     _DEADLINE_TASK = start_deadline_sweeper()

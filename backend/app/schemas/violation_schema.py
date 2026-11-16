@@ -17,6 +17,9 @@ ALLOWED_EVENT_TYPES = {
     # Phase 0: thí sinh dùng web trong khi đề đang bắt buộc Safe Exam Browser Client.
     # Đây là BẰNG CHỨNG ghi nhận, không phải cơ chế ngăn chặn (skills.md Quy tắc #5).
     "UNAUTHORIZED_CLIENT",
+    # Sự kiện kiểm toán mở khóa thoát phòng thi
+    "EXIT_UNLOCK_GRANTED",
+    "EXIT_UNLOCK_DENIED",
 }
 
 ALLOWED_SEVERITIES = {"LOW", "MEDIUM", "HIGH"}
@@ -31,6 +34,8 @@ EVENT_TYPE_SEVERITY = {
     "DUPLICATE_LOGIN": "HIGH",
     "CONNECTION_LOST": "MEDIUM",
     "UNAUTHORIZED_CLIENT": "HIGH",
+    "EXIT_UNLOCK_GRANTED": "LOW",
+    "EXIT_UNLOCK_DENIED": "MEDIUM",
 }
 
 

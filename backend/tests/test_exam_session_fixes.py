@@ -104,6 +104,42 @@ def test_claiming_seb_without_attestation_stays_restricted(db, seeded):
     assert state.restricted_mode is True
 
 
+def test_allow_web_fallback_false_blocks_unattested_client(db, seeded):
+    """Khi require_safe_browser=True và allow_web_fallback=False, unattested client bị 403."""
+    from fastapi import HTTPException
+    from app.schemas.settings_schema import ExamSecurityConfig
+
+    exam = seeded["exam"]
+    exam.require_safe_browser = True
+    SettingsService.set_require_safe_browser_global(db, True, seeded["admin"].id)
+    ExamSecurityService.save_config(db, exam.id, ExamSecurityConfig(allow_web_fallback=False))
+    db.commit()
+
+    with pytest.raises(HTTPException) as exc_info:
+        _join(db, seeded, client_type="web", attested=False)
+    assert exc_info.value.status_code == 403
+
+    # Kể cả client tự khai là seb nhưng attested=False cũng bị 403
+    with pytest.raises(HTTPException) as exc_info_seb:
+        _join(db, seeded, client_type="seb", attested=False)
+    assert exc_info_seb.value.status_code == 403
+
+
+def test_allow_web_fallback_false_allows_attested_seb_client(db, seeded):
+    """Khi require_safe_browser=True và allow_web_fallback=False, attested SEB client vẫn vào được bình thường."""
+    from app.schemas.settings_schema import ExamSecurityConfig
+
+    exam = seeded["exam"]
+    exam.require_safe_browser = True
+    SettingsService.set_require_safe_browser_global(db, True, seeded["admin"].id)
+    ExamSecurityService.save_config(db, exam.id, ExamSecurityConfig(allow_web_fallback=False))
+    db.commit()
+
+    state = _join(db, seeded, client_type="seb", attested=True)
+    assert state.restricted_mode is False
+    assert state.session_id is not None
+
+
 # --- save_answer: các bản vá bảo mật ---
 
 def test_save_answer_ok(db, seeded):
