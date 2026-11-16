@@ -63,6 +63,7 @@ def get_session_identity(
     return ClientIdentityResponse(
         client_type=session.client_type,
         client_version=session.client_version,
+        client_hash=session.client_hash,
         device_fingerprint=session.device_fingerprint,
         attestation_status=session.attestation_status,
     )

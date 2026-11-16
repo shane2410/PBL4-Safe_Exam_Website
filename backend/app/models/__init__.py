@@ -15,6 +15,7 @@ from app.models.student_answer import StudentAnswer
 from app.models.violation_log import ViolationLog
 from app.models.audit_log import AuditLog
 from app.models.system_setting import SystemSetting
+from app.models.signed_client_release import SignedClientRelease
 
 __all__ = [
     "Base",
@@ -34,4 +35,5 @@ __all__ = [
     "ViolationLog",
     "AuditLog",
     "SystemSetting",
+    "SignedClientRelease",
 ]

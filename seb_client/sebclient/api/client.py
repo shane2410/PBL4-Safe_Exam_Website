@@ -18,10 +18,12 @@ from ..constants import (
     CLIENT_TYPE,
     CLIENT_VERSION,
     HEADER_ATTESTATION,
+    HEADER_CLIENT_HASH,
     HEADER_CLIENT_TYPE,
     HEADER_CLIENT_VERSION,
     HEADER_DEVICE_FINGERPRINT,
 )
+from ..integrity.self_check import compute_hash
 
 logger = logging.getLogger(__name__)
 
@@ -52,6 +54,17 @@ class ApiClient:
         self._attestation_token: str | None = None
         self._device_fingerprint: str | None = None
         self._user: dict | None = None
+        self._client_hash: str | None = None
+
+    @property
+    def client_hash(self) -> str:
+        if self._client_hash is None:
+            try:
+                self._client_hash = compute_hash()
+            except Exception as exc:  # noqa: BLE001
+                logger.warning("Không thể tính client_hash: %s", exc)
+                self._client_hash = ""
+        return self._client_hash
 
     @property
     def is_authenticated(self) -> bool:
@@ -84,6 +97,16 @@ class ApiClient:
         # Dọn token khỏi RAM khi thoát.
         self._access_token = None
         self._attestation_token = None
+
+    async def get_client_config(self) -> dict:
+        """Lấy cấu hình SEB Client từ server (min_version, heartbeat_interval...)."""
+        try:
+            response = await self._http.get("/auth/client-config", headers=self._base_headers())
+            if response.status_code == 200:
+                return response.json()
+        except Exception as exc:  # noqa: BLE001
+            logger.debug("Không thể lấy cấu hình client từ backend: %s", exc)
+        return {}
 
     async def login(self, username: str, password: str) -> dict:
         """Đăng nhập và giữ token trong RAM. Trả về thông tin user."""
@@ -239,10 +262,14 @@ class ApiClient:
             raise ApiError("Chưa đăng nhập.")
 
     def _base_headers(self) -> dict[str, str]:
-        return {
+        headers = {
             HEADER_CLIENT_TYPE: CLIENT_TYPE,
             HEADER_CLIENT_VERSION: CLIENT_VERSION,
         }
+        h = self.client_hash
+        if h:
+            headers[HEADER_CLIENT_HASH] = h
+        return headers
 
     def _auth_headers(self) -> dict[str, str]:
         headers = self._base_headers()

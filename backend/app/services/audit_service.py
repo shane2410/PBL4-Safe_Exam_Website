@@ -38,6 +38,7 @@ ACTIONS = {
     "FORCE_SUBMIT": "Giám thị thu bài",
     "DEVICE_REVOKE": "Thu hồi thiết bị",
     "DEVICE_UNREVOKE": "Mở khoá thiết bị",
+    "CLIENT_RELEASE_CREATE": "Đăng ký bản phát hành SEB Client",
 }
 
 

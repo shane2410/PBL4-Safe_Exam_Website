@@ -32,6 +32,7 @@ from ..constants import (
     CLIENT_TYPE,
     CLIENT_VERSION,
     HEADER_ATTESTATION,
+    HEADER_CLIENT_HASH,
     HEADER_CLIENT_TYPE,
     HEADER_CLIENT_VERSION,
     HEADER_DEVICE_FINGERPRINT,
@@ -141,6 +142,9 @@ class ExamWindow(QMainWindow):
             HEADER_CLIENT_TYPE: CLIENT_TYPE,
             HEADER_CLIENT_VERSION: CLIENT_VERSION,
         }
+        h = self._api.client_hash
+        if h:
+            headers[HEADER_CLIENT_HASH] = h
         token = self._api.attestation_token
         if token:
             headers[HEADER_ATTESTATION] = token

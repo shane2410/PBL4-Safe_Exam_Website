@@ -162,6 +162,16 @@ def main() -> int:
     logger.info("=== %s khoi dong ===", "SEB Client")
     logger.info("Log file: %s", log_file)
 
+    # Kiểm tra toàn vẹn và chống phân tích gỡ lỗi (Phase 2)
+    from .integrity import enforce_anti_debug, verify_self_integrity
+
+    try:
+        verify_self_integrity()
+        enforce_anti_debug()
+    except SystemExit as exc:
+        _show_fatal(str(exc))
+        return 1
+
     # Chế độ "mở file cấu hình" phải được nhận diện TRƯỚC khi validate `.env`:
     # chế độ này không dùng backend, nên một `.env` thiếu khoá không được phép
     # chặn việc mở file cấu hình.

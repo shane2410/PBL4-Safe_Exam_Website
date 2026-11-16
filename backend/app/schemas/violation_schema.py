@@ -17,6 +17,8 @@ ALLOWED_EVENT_TYPES = {
     # Phase 0: thí sinh dùng web trong khi đề đang bắt buộc Safe Exam Browser Client.
     # Đây là BẰNG CHỨNG ghi nhận, không phải cơ chế ngăn chặn (skills.md Quy tắc #5).
     "UNAUTHORIZED_CLIENT",
+    # Phase 2: Mã băm SHA-256 của SEB Client không khớp với danh sách bản phát hành đã ký.
+    "CLIENT_HASH_INVALID",
 }
 
 ALLOWED_SEVERITIES = {"LOW", "MEDIUM", "HIGH"}
@@ -31,6 +33,7 @@ EVENT_TYPE_SEVERITY = {
     "DUPLICATE_LOGIN": "HIGH",
     "CONNECTION_LOST": "MEDIUM",
     "UNAUTHORIZED_CLIENT": "HIGH",
+    "CLIENT_HASH_INVALID": "HIGH",
 }
 
 

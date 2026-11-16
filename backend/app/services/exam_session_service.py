@@ -87,15 +87,32 @@ class ExamSessionService:
 
         # Client tự khai là SEB thì vẫn phải được xác thực bằng challenge-response.
         # Nếu chưa attest -> coi như web thường (không tin lời khai của client).
-        #
-        # KHÔNG dùng trạng thái phiên để suy ra điều này: một phiên đã VERIFIED
-        # rồi thì ai có access token cũng mở được bằng trình duyệt thường, đúng
-        # thứ cần chặn. Việc trang web nhúng trong SEB không bị coi là "web" là
-        # trách nhiệm của client — nó phải gắn header định danh cho request do
-        # webview phát ra (sebclient/ui/request_interceptor.py) và attest lại
-        # trước khi token 5 phút hết hạn.
         claims_seb = identity.is_seb
         is_verified_seb = claims_seb and identity.attested
+
+        # Phase 2: Kiểm tra tính toàn vẹn của mã băm client (signed_client_releases allowlist)
+        from app.models.signed_client_release import SignedClientRelease
+        from sqlalchemy import func
+
+        has_active_releases = db.query(SignedClientRelease).filter(
+            SignedClientRelease.is_active.is_(True)
+        ).count() > 0
+
+        hash_invalid = False
+        if claims_seb and has_active_releases:
+            if not identity.client_hash:
+                hash_invalid = True
+            else:
+                matched_release = db.query(SignedClientRelease).filter(
+                    SignedClientRelease.is_active.is_(True),
+                    func.lower(SignedClientRelease.hash) == identity.client_hash.lower(),
+                ).first()
+                if not matched_release:
+                    hash_invalid = True
+
+        if hash_invalid:
+            is_verified_seb = False
+
         restricted_mode = seb_required and not is_verified_seb
 
         # Check existing session
@@ -108,7 +125,9 @@ class ExamSessionService:
         if not session:
             token = f"sess_{uuid.uuid4().hex}"
             attestation_status = "VERIFIED" if is_verified_seb else "NOT_ATTESTED"
-            if seb_required and not is_verified_seb:
+            if hash_invalid:
+                attestation_status = "FAILED"
+            elif seb_required and not is_verified_seb:
                 attestation_status = "REQUIRED_MISSING"
 
             session = ExamSession(
@@ -119,8 +138,9 @@ class ExamSessionService:
                 status="IN_PROGRESS",
                 ip_address=ip_address,
                 user_agent=user_agent,
-                client_type="seb" if is_verified_seb else "web",
+                client_type="seb" if (is_verified_seb or claims_seb) else "web",
                 client_version=identity.client_version,
+                client_hash=identity.client_hash,
                 device_fingerprint=identity.device_fingerprint,
                 device_id=_device_id_from_fingerprint(identity.device_fingerprint),
                 attestation_status=attestation_status,
@@ -163,22 +183,43 @@ class ExamSessionService:
             # (VD: chính trang web nhúng trong SEB Client gọi lại join_exam) KHÔNG
             # được xoá dấu vết client đã xác thực — nếu không, thí sinh chỉ cần
             # mở web app là mất hoàn toàn dấu vết SEB khỏi phiên.
-            if is_verified_seb:
+            if hash_invalid:
+                session.attestation_status = "FAILED"
+            elif is_verified_seb:
                 session.client_type = "seb"
                 session.attestation_status = "VERIFIED"
             session.client_version = identity.client_version or session.client_version
+            if identity.client_hash:
+                session.client_hash = identity.client_hash
             if identity.device_fingerprint:
                 session.device_fingerprint = identity.device_fingerprint
                 session.device_id = _device_id_from_fingerprint(
                     identity.device_fingerprint
                 ) or session.device_id
-            elif seb_required and session.attestation_status != "VERIFIED":
+            elif seb_required and session.attestation_status not in ("VERIFIED", "FAILED"):
                 session.attestation_status = "REQUIRED_MISSING"
             try:
                 db.commit()
             except Exception as e:
                 db.rollback()
                 logger.warning("Failed to update reconnect client info for session %d: %s", session.id, e)
+
+        # Ghi nhận vi phạm mã băm client không hợp lệ (Phase 2)
+        if hash_invalid:
+            AnticheatService.record_violation(db, session.id, ViolationLogCreate(
+                event_type="CLIENT_HASH_INVALID",
+                detail={
+                    "reason": "Mã băm client không khớp danh sách phát hành hợp lệ",
+                    "client_hash": identity.client_hash,
+                    "claimed_client_type": identity.client_type,
+                },
+                client_timestamp=datetime.now(timezone.utc),
+            ))
+            if seb_required:
+                raise HTTPException(
+                    status_code=status.HTTP_403_FORBIDDEN,
+                    detail="Mã băm SEB Client không hợp lệ hoặc đã bị sửa đổi (CLIENT_HASH_INVALID)",
+                )
 
         # Ghi vết client đã xác thực vào CHÍNH phiên thi này (áp dụng cho cả
         # lần tạo phiên mới lẫn reconnect — nếu chỉ ghi ở nhánh tạo mới thì

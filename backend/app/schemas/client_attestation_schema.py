@@ -50,5 +50,6 @@ class ClientIdentityResponse(BaseModel):
     """Thông tin định danh client mà server đã ghi nhận cho phiên thi."""
     client_type: str
     client_version: Optional[str] = None
+    client_hash: Optional[str] = None
     device_fingerprint: Optional[str] = None
     attestation_status: str

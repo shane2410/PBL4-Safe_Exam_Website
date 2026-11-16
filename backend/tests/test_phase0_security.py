@@ -217,7 +217,8 @@ def test_nonce_never_stored_in_plaintext_in_db(db, seeded):
 def test_event_type_whitelist():
     assert "TAB_SWITCH" in ALLOWED_EVENT_TYPES
     assert "UNAUTHORIZED_CLIENT" in ALLOWED_EVENT_TYPES
-    assert len(ALLOWED_EVENT_TYPES) == 8
+    assert "CLIENT_HASH_INVALID" in ALLOWED_EVENT_TYPES
+    assert len(ALLOWED_EVENT_TYPES) == 9
 
 
 def test_unknown_event_type_rejected():
