@@ -19,10 +19,15 @@ from app.schemas.user_admin_schema import (
     UserUpdate,
 )
 from app.models.client_device import ClientDevice
+from app.models.signed_client_release import SignedClientRelease
 from app.schemas.client_device_admin_schema import (
     ClientDeviceAdminResponse,
     ClientDeviceListResponse,
     ClientDeviceRevokeRequest,
+)
+from app.schemas.client_release_schema import (
+    ClientReleaseCreate,
+    ClientReleaseResponse,
 )
 from app.services.audit_service import ACTIONS, AuditService
 
@@ -403,3 +408,73 @@ def revoke_client_device(
         last_seen_at=device.last_seen_at,
         revoked_at=device.revoked_at,
     )
+
+
+# --- Quản lý bản phát hành SEB Client đã ký (Phase 2) ---
+
+@router.get("/client-releases", response_model=List[ClientReleaseResponse])
+def list_client_releases(
+    is_active: Optional[bool] = None,
+    os_name: Optional[str] = None,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(require_role(["ADMIN"])),
+):
+    """Lấy danh sách các bản phát hành SEB Client đã được phê duyệt / ký số."""
+    query = db.query(SignedClientRelease)
+    if is_active is not None:
+        query = query.filter(SignedClientRelease.is_active.is_(is_active))
+    if os_name:
+        query = query.filter(
+            (SignedClientRelease.os == os_name.strip().lower())
+            | (SignedClientRelease.os == "all")
+        )
+    return query.order_by(SignedClientRelease.id.desc()).all()
+
+
+@router.post("/client-releases", response_model=ClientReleaseResponse, status_code=status.HTTP_201_CREATED)
+def create_client_release(
+    payload: ClientReleaseCreate,
+    request: Request,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(require_role(["ADMIN"])),
+):
+    """Đăng ký mã băm của một bản phát hành SEB Client mới."""
+    # Kiểm tra trùng lặp hash
+    existing = db.query(SignedClientRelease).filter(
+        SignedClientRelease.hash == payload.hash,
+        SignedClientRelease.os == payload.os,
+    ).first()
+    if existing:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Bản phát hành với hash này đã tồn tại (version: {existing.version})",
+        )
+
+    now = datetime.now(timezone.utc)
+    release = SignedClientRelease(
+        version=payload.version.strip(),
+        hash=payload.hash,
+        os=payload.os,
+        released_at=now,
+        is_active=payload.is_active if payload.is_active is not None else True,
+        notes=payload.notes,
+    )
+    db.add(release)
+    db.commit()
+    db.refresh(release)
+
+    AuditService.log(
+        db,
+        "CLIENT_RELEASE_CREATE",
+        current_user.id,
+        _client_ip(request),
+    )
+    logger.info(
+        "Admin %s đăng ký bản phát hành SEB Client v%s (%s, hash=%s)",
+        current_user.username,
+        release.version,
+        release.os,
+        release.hash[:16],
+    )
+    return release
+

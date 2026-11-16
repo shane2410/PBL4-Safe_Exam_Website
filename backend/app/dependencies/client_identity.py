@@ -12,6 +12,7 @@ from app.schemas.client_attestation_schema import CLIENT_TYPES
 # do AttestationService (challenge-response HMAC) quyết định — xem Quy tắc #4.
 HEADER_CLIENT_TYPE = "X-Client-Type"
 HEADER_CLIENT_VERSION = "X-Client-Version"
+HEADER_CLIENT_HASH = "X-Client-Hash"
 HEADER_DEVICE_FINGERPRINT = "X-Device-Fingerprint"
 HEADER_ATTESTATION_TOKEN = "X-Attestation-Token"
 
@@ -51,17 +52,19 @@ def verify_attestation_token(token: str, user_id: int, fingerprint: Optional[str
 class ClientIdentity:
     """Định danh client cho request hiện tại."""
 
-    __slots__ = ("client_type", "client_version", "device_fingerprint", "attested")
+    __slots__ = ("client_type", "client_version", "client_hash", "device_fingerprint", "attested")
 
     def __init__(
         self,
         client_type: str = "web",
         client_version: Optional[str] = None,
+        client_hash: Optional[str] = None,
         device_fingerprint: Optional[str] = None,
         attested: bool = False,
     ) -> None:
         self.client_type = client_type
         self.client_version = client_version
+        self.client_hash = client_hash
         self.device_fingerprint = device_fingerprint
         self.attested = attested
 
@@ -74,6 +77,7 @@ def get_client_identity(
     current_user: User = Depends(get_current_user),
     x_client_type: Optional[str] = Header(default=None, alias=HEADER_CLIENT_TYPE),
     x_client_version: Optional[str] = Header(default=None, alias=HEADER_CLIENT_VERSION),
+    x_client_hash: Optional[str] = Header(default=None, alias=HEADER_CLIENT_HASH),
     x_device_fingerprint: Optional[str] = Header(default=None, alias=HEADER_DEVICE_FINGERPRINT),
     x_attestation_token: Optional[str] = Header(default=None, alias=HEADER_ATTESTATION_TOKEN),
 ) -> ClientIdentity:
@@ -83,6 +87,7 @@ def get_client_identity(
         client_type = "web"
 
     version = (x_client_version or "").strip()[:20] or None
+    client_hash = (x_client_hash or "").strip().lower()[:64] or None
     fingerprint = (x_device_fingerprint or "").strip()[:128] or None
 
     # Chỉ coi là SEB Client đã xác thực khi token hợp lệ — không dựa vào header.
@@ -93,6 +98,7 @@ def get_client_identity(
     return ClientIdentity(
         client_type=client_type,
         client_version=version,
+        client_hash=client_hash,
         device_fingerprint=fingerprint,
         attested=attested,
     )

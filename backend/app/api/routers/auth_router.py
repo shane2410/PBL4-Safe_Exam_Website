@@ -11,10 +11,11 @@ from app.schemas.client_device_schema import (
     ClientDeviceResponse,
 )
 from app.schemas.client_attestation_schema import (
-    ClientAttestRequest, ClientAttestResponse, ClientNonceResponse
+    ClientNonceResponse, ClientAttestRequest, ClientAttestResponse
 )
-from app.services.auth_service import AuthService
+from app.schemas.settings_schema import SebClientConfig
 from app.services.attestation_service import AttestationService
+from app.services.settings_service import SettingsService
 from app.services.client_device_service import ClientDeviceService, DeviceKeyError
 
 router = APIRouter(prefix="/auth", tags=["Authentication"])
@@ -110,3 +111,10 @@ def attest_client(
     đúng một lần và dùng để ký các heartbeat sau (Phase 1).
     """
     return AttestationService.verify_attestation(db, current_user, payload)
+
+
+@router.get("/client-config", response_model=SebClientConfig)
+def get_client_config(db: Session = Depends(get_db)):
+    """Trả về cấu hình SEB client hiện hành từ cài đặt hệ thống (bao gồm min_version)."""
+    return SettingsService.get_seb_client_config(db)
+

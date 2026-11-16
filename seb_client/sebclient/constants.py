@@ -12,9 +12,14 @@ APP_DISPLAY_NAME = "An toàn thi trực tuyến"
 CLIENT_TYPE = "seb"
 CLIENT_VERSION = "1.0.0-phase1"
 
+# SHA-256 hash chuẩn của bản build phát hành (None nếu đang ở chế độ dev).
+# Build script sẽ điền chuỗi hex 64 ký tự vào đây trước khi đóng gói / ký số.
+BASE_HASH: str | None = None
+
 # Header bắt buộc gửi kèm mọi request tới backend.
 HEADER_CLIENT_TYPE = "X-Client-Type"
 HEADER_CLIENT_VERSION = "X-Client-Version"
+HEADER_CLIENT_HASH = "X-Client-Hash"
 HEADER_ATTESTATION = "X-Attestation-Token"
 HEADER_DEVICE_FINGERPRINT = "X-Device-Fingerprint"
 

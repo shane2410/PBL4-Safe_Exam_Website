@@ -20,6 +20,8 @@ ALLOWED_EVENT_TYPES = {
     # Sự kiện kiểm toán mở khóa thoát phòng thi
     "EXIT_UNLOCK_GRANTED",
     "EXIT_UNLOCK_DENIED",
+    # Phase 2: Mã băm SHA-256 của SEB Client không khớp với danh sách bản phát hành đã ký.
+    "CLIENT_HASH_INVALID",
 }
 
 ALLOWED_SEVERITIES = {"LOW", "MEDIUM", "HIGH"}
@@ -36,6 +38,7 @@ EVENT_TYPE_SEVERITY = {
     "UNAUTHORIZED_CLIENT": "HIGH",
     "EXIT_UNLOCK_GRANTED": "LOW",
     "EXIT_UNLOCK_DENIED": "MEDIUM",
+    "CLIENT_HASH_INVALID": "HIGH",
 }
 
 

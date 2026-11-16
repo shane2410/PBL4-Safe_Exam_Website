@@ -192,6 +192,21 @@ class LoginWindow(QWidget):
             self._refresh_submit()
             return
 
+        # Phase 2: Kiểm tra phiên bản tối thiểu với server (license_check)
+        from ..integrity import enforce_min_version
+
+        client_cfg = await self._api.get_client_config()
+        min_ver = client_cfg.get("min_version")
+        if min_ver:
+            try:
+                enforce_min_version(min_ver)
+            except SystemExit:
+                self._set_status(f"Bắt buộc cập nhật SEB Client lên >= {min_ver}", "error")
+                self.login_failed.emit(f"Phiên bản client đã cũ. Yêu cầu tối thiểu: {min_ver}")
+                self._submit.setText("Vào phòng thi")
+                self._refresh_submit()
+                return
+
         room_code = self._room_code.text().strip().upper()
         self._set_status("Đăng nhập thành công.")
         self.login_succeeded.emit(user, room_code)

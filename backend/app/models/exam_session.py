@@ -26,6 +26,7 @@ class ExamSession(Base):
     # --- Thông tin client (Phase 0/1) ---
     client_type = Column(String(20), default="web", nullable=False)  # web | seb
     client_version = Column(String(20), nullable=True)
+    client_hash = Column(String(64), nullable=True)
     # Thiết bị Ed25519 đã xác thực cho phiên này (NULL nếu client chưa attest).
     device_id = Column(String(32), nullable=True, index=True)
     device_fingerprint = Column(String(128), nullable=True)

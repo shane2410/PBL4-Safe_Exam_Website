@@ -219,7 +219,8 @@ def test_event_type_whitelist():
     assert "UNAUTHORIZED_CLIENT" in ALLOWED_EVENT_TYPES
     assert "EXIT_UNLOCK_GRANTED" in ALLOWED_EVENT_TYPES
     assert "EXIT_UNLOCK_DENIED" in ALLOWED_EVENT_TYPES
-    assert len(ALLOWED_EVENT_TYPES) == 10
+    assert "CLIENT_HASH_INVALID" in ALLOWED_EVENT_TYPES
+    assert len(ALLOWED_EVENT_TYPES) == 11
 
 
 def test_unknown_event_type_rejected():
