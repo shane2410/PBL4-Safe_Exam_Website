@@ -272,3 +272,19 @@ def test_results_detection_ignored_when_already_blocked(qapp):
     _on_url_changed(window, QUrl("http://localhost:5173/exam/results"))
 
     assert blocked_reasons == []
+
+
+def test_exam_window_on_window_switch_reports_violation():
+    """Kiểm tra _on_window_switch gọi đúng VIOLATION_TAB_SWITCH không bị NameError."""
+    from sebclient.constants import VIOLATION_TAB_SWITCH
+    from sebclient.ui.exam_window import ExamWindow
+
+    window = _bare_exam_window()
+    reported = []
+    window._report_violation = lambda evt, detail: reported.append((evt, detail))
+
+    ExamWindow._on_window_switch(window)
+    assert len(reported) == 1
+    assert reported[0][0] == VIOLATION_TAB_SWITCH
+    assert reported[0][1] == {"detected": "os_window_switch"}
+

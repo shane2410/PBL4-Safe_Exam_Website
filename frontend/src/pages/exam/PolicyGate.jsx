@@ -14,10 +14,13 @@ import Icon from '../../components/common/Icon'
  * @param {boolean}  props.canFallback GV có cho phép thi bằng web chế độ hạn chế
  * @param {Function} props.onAcceptFallback
  */
+const GITHUB_RELEASES_URL =
+  'https://github.com/shane2410/PBL4-Safe_Exam_Website/releases/latest'
+
 const DOWNLOADS = [
-  { os: 'Windows', icon: 'desktop_windows', ext: '.exe' },
-  { os: 'macOS', icon: 'laptop_mac', ext: '.dmg' },
-  { os: 'Linux', icon: 'terminal', ext: '.AppImage' },
+  { os: 'Windows', icon: 'desktop_windows', ext: '.exe', url: GITHUB_RELEASES_URL },
+  { os: 'macOS', icon: 'laptop_mac', ext: '.dmg', url: GITHUB_RELEASES_URL },
+  { os: 'Linux', icon: 'terminal', ext: '.AppImage', url: GITHUB_RELEASES_URL },
 ]
 
 export default function PolicyGate({
@@ -72,22 +75,23 @@ export default function PolicyGate({
           {/* Nút tải theo hệ điều hành */}
           <div className="grid grid-cols-3 gap-3">
             {DOWNLOADS.map((d) => (
-              <button
+              <a
                 key={d.os}
-                type="button"
-                className="flex flex-col items-center gap-2 p-3 rounded-lg border border-slate-200 hover:border-primary hover:bg-primary-50 transition-colors"
-                // TODO(Phase 1): thay bằng URL phát hành thật khi có SEB Client
-                title={`Tải cho ${d.os} (${d.ext}) — sẽ khả dụng ở Phase 1`}
+                href={d.url}
+                target="_blank"
+                rel="noopener noreferrer"
+                className="flex flex-col items-center gap-2 p-3 rounded-lg border border-slate-200 hover:border-primary hover:bg-primary-50 transition-colors text-center"
+                title={`Tải SEB Client cho ${d.os} (${d.ext})`}
               >
                 <Icon name={d.icon} size={22} className="text-slate-600" />
                 <span className="text-xs font-medium text-slate-700">{d.os}</span>
                 <span className="text-[10px] text-slate-400 font-mono">{d.ext}</span>
-              </button>
+              </a>
             ))}
           </div>
 
           <p className="text-xs text-slate-400 text-center">
-            SEB Client dự kiến khả dụng ở Phase 1 của đồ án.
+            Tải và cài đặt phiên bản SEB Client phù hợp với hệ điều hành của bạn từ GitHub Releases.
           </p>
 
           {/* Hành động */}

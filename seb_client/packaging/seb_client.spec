@@ -29,13 +29,22 @@ hiddenimports = [
     "socketio.async_client",
     "socketio.async_manager",
     "socketio.client",
-    # QtWebEngine: các module này được nạp qua plugin/hook, phải khai báo tường
-    # minh để không mất QtWebEngineProcess.
+    # PySide6 & shiboken6: đầy đủ module Qt được SEB Client sử dụng
+    "shiboken6",
+    "PySide6.QtCore",
+    "PySide6.QtGui",
+    "PySide6.QtWidgets",
     "PySide6.QtWebEngineCore",
     "PySide6.QtWebEngineWidgets",
     "PySide6.QtWebEngineQuick",
     "PySide6.QtNetwork",
     "PySide6.QtPrintSupport",
+    "PySide6.QtOpenGL",
+    "PySide6.QtOpenGLWidgets",
+    "PySide6.QtSvg",
+    # Thư viện hỗ trợ
+    "packaging",
+    "packaging.version",
 ]
 
 if sys.platform == "win32":

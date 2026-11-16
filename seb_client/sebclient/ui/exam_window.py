@@ -36,6 +36,7 @@ from ..constants import (
     HEADER_CLIENT_VERSION,
     HEADER_DEVICE_FINGERPRINT,
     RESULTS_PATH_SUFFIX,
+    VIOLATION_TAB_SWITCH,
 )
 from ..guards.base import BaseGuard
 from .blocked_overlay import BlockedOverlay
