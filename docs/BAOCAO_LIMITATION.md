@@ -131,7 +131,54 @@ Ngoài ra:
 
 ---
 
-## 5. Ma trận năng lực theo hệ điều hành (lớp SEB Client — Phase 1)
+## 5. Hạn chế Phase 2 (Chống crack & can thiệp mã nhị phân)
+
+Các biện pháp bảo vệ ở Phase 2 (chống sửa đổi, chống dịch ngược và chống debug) có những giới hạn cốt lõi xuất phát từ thực tế: **phần mềm chạy trên phần cứng do người dùng kiểm soát**.
+
+### 5.1 Giới hạn của cơ chế `self_check` (toàn vẹn nhị phân)
+Cơ chế tự kiểm tra hash SHA-256 của file đang chạy so với hash nhúng sẵn mang tính chất **tự tham chiếu (self-referential)**:
+- Mã thực thi tự kiểm tra nằm trong chính binary mà nó có nhiệm vụ bảo vệ.
+- Kẻ tấn công có kiến thức về Reverse Engineering hoàn toàn có thể dùng debugger hoặc decompiler (Ghidra, IDA Pro, x64dbg) để tìm đoạn kiểm tra hash và sửa lệnh rẽ nhánh (VD: đổi `JZ` thành `JNZ` hoặc `NOP` toàn bộ hàm kiểm tra).
+- Do đó, `self_check` chỉ có tác dụng ngăn chặn các chỉnh sửa vô tình, chỉnh sửa thô sơ (sửa file text/resource) hoặc người dùng không có kỹ năng dịch ngược; **đây là rào chắn mức đồ án, không phải giải pháp DRM thương mại**.
+
+### 5.2 Giới hạn của cơ chế `anti_debug`
+Module phát hiện debugger sử dụng các API cấp người dùng (User-mode API):
+- Windows: `IsDebuggerPresent()`, `CheckRemoteDebuggerPresent()`.
+- Linux: Kiểm tra `TracerPid` trong `/proc/self/status`, `ptrace(PTRACE_TRACEME)`.
+- macOS: Gọi `sysctl` kiểm tra cờ `P_TRACED`.
+
+**Giới hạn:**
+- Chỉ phát hiện được các debugger tiêu chuẩn chạy ở User space (GDB, LLDB, x64dbg chế độ thường).
+- **Hoàn toàn KHÔNG chống được Kernel-level debugger** (như WinDbg qua cáp COM/mạng, ScyllaHide hook ntdll, Hypervisor-based debugger, hoặc công cụ can thiệp driver như Cheat Engine DBVM).
+- Khi trình bày báo cáo, **tuyệt đối không được tuyên bố hệ thống chống được dịch ngược hay chống can thiệp ở mức hạt nhân**.
+
+### 5.3 Giới hạn của cơ chế Allowlist `client_hash`
+Server lưu danh sách hash SHA-256 của các bản release hợp lệ (`signed_client_releases`) và đối chiếu khi client gửi attestation:
+- **Chi phí vận hành thủ công cao:** Mỗi lần vá lỗi, cập nhật tính năng hoặc biên dịch trên một nền tảng mới (Windows, macOS, Ubuntu, Fedora), quản trị viên/giảng viên phải tính toán lại hash và đăng ký thủ công vào cơ sở dữ liệu. Nếu quên cập nhật, toàn bộ thí sinh dùng bản mới sẽ bị từ chối vào phòng thi (`CLIENT_HASH_NOT_REGISTERED`).
+- **Không ngăn được việc patch runtime sau khi attestation:** Kẻ tấn công có thể để client gốc hoàn thành attestation hợp lệ để lấy token, sau đó dùng DLL Injection hoặc Memory Patching để can thiệp vào tiến trình đang chạy (VD: vô hiệu hóa `enter_kiosk()` hoặc `keyboard_guard`). Server không thể liên tục xác minh bộ nhớ động của client từ xa.
+
+---
+
+## 6. Hạn chế kiểm thử tải (Load Testing)
+
+- **Chưa thử nghiệm trên cụm phân tán (Distributed Cluster):** Hệ thống mới chỉ có kịch bản kiểm thử tải dạng kịch bản mẫu/locustfile (`locustfile.py`), chạy cục bộ trên một máy đơn lẻ. Chưa có kết quả đo đạc thực tế khi chịu tải đồng thời từ hàng nghìn kết nối mạng phân tán ngoài môi trường Internet.
+- **Ràng buộc tiến trình đơn (Single Worker Constraint):** Do cơ chế nonce một lần của challenge-response và bộ nhớ trạng thái WebSocket/Socket.IO hiện tại được lưu trữ in-memory trong tiến trình Python (`uvicorn app.main:app --workers 1`), hệ thống chưa thể mở rộng ngang (horizontal scale) ra nhiều worker hoặc nhiều máy chủ mà không có tầng chia sẻ trạng thái tập trung (Redis / Distributed Key-Value Store).
+
+---
+
+## 7. Các vấn đề kỹ thuật đã biết (Known Issues)
+
+1. **`allow_web_fallback` chưa được cưỡng chế ở tầng backend:**
+   - Cờ `allow_web_fallback = false` hiện tại chỉ được frontend đọc để hiển thị thông báo chặn trên giao diện `PolicyGate.jsx`.
+   - Nếu thí sinh dùng `curl` hoặc viết script gọi thẳng `POST /api/exam-sessions/join`, backend vẫn khởi tạo phiên thi ở chế độ `restricted_mode = true` thay vì trả về `HTTP 403 SEB_REQUIRED`. Đây là quyết định chủ động ghi nhận bằng chứng thay vì chặn cứng, nhưng cần được hoàn thiện ở tầng server trong phiên bản tương lai.
+2. **Sự kiện mất mạng (`CONNECTION_LOST`) và sự kiện kiểm toán bị tính gộp vào ngưỡng vi phạm:**
+   - Trong `anticheat_service.py`, ngưỡng tự động nộp bài được tính bằng tổng số bản ghi trong bảng `violation_logs`.
+   - Do đó, nếu mạng chập chờn kích hoạt sự kiện `CONNECTION_LOST` (mức rủi ro 5), thí sinh có thể bị mất một phần ngân sách vi phạm cho phép (`max_violation_allowed`), dù mất mạng là sự cố hạ tầng chứ không phải hành vi gian lận chủ đích.
+   - Hướng xử lý: Tách biệt bộ đếm `connection_lost_count` và bộ lọc `AUDIT_ONLY_EVENT_TYPES` ra khỏi công thức tự động nộp bài `AUTO_VIOLATION`.
+
+---
+
+## 8. Ma trận năng lực theo hệ điều hành (lớp SEB Client — Phase 1)
 
 | Cơ chế | Windows | macOS | Linux (X11) | Linux (Wayland) |
 |---|---|---|---|---|
@@ -146,7 +193,7 @@ Ngoài ra:
 
 ---
 
-## 6. Điểm mạnh thật sự của hệ thống
+## 9. Điểm mạnh thật sự của hệ thống
 
 Để đánh giá công bằng, các cơ chế sau **không** dễ lách, kể cả khi thí sinh cố tình:
 
@@ -164,7 +211,7 @@ Ngoài ra:
 
 ---
 
-## 7. Kết luận
+## 10. Kết luận
 
 Hệ thống đạt được mức độ phù hợp cho **bài thi trực tuyến có giám sát, kèm cơ chế phục tra**.
 
@@ -173,6 +220,6 @@ Nó **không** thay thế được:
 - Thiết bị kiểm soát riêng do nhà trường quản lý (Lockdown Browser, Safe Exam Browser thật).
 - Nhận diện khuôn mặn thời gian thực (chỉ là tuỳ chọn nâng cao, chưa triển khai).
 
-Khi trình bày trước hội đồng, **nêu rõ mục 2 (những gì không chặn được) và mục 6 (điểm mạnh
+Khi trình bày trước hội đồng, **nêu rõ mục 2 (những gì không chặn được) và mục 9 (điểm mạnh
 thật sự)**. Đây là cách thể hiện sự hiểu sâu kỹ thuật, khác hẳn với việc tuyên bố
 "chống gian lận 100%" — tuyên bố đó vừa sai, vừa dễ bị phát hiện là thiếu hiểu biết.
