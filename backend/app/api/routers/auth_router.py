@@ -14,6 +14,7 @@ from app.schemas.client_attestation_schema import (
     ClientNonceResponse, ClientAttestRequest, ClientAttestResponse
 )
 from app.schemas.settings_schema import SebClientConfig
+from app.services.auth_service import AuthService
 from app.services.attestation_service import AttestationService
 from app.services.settings_service import SettingsService
 from app.services.client_device_service import ClientDeviceService, DeviceKeyError
