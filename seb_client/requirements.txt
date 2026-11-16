@@ -17,6 +17,7 @@ python-engineio==4.14.0
 httpx==0.28.1
 cryptography==50.0.2
 python-dotenv==1.2.3
+packaging==26.3
 
 # --- Chỉ Windows ---
 pywin32==312 ; sys_platform == "win32"

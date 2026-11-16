@@ -6,6 +6,7 @@ Không có nút thoát ẩn, không có menu. Sau khi đăng nhập thành công
 
 from __future__ import annotations
 
+import asyncio
 import logging
 
 from PySide6.QtCore import Qt, Signal
@@ -138,7 +139,11 @@ class LoginWindow(QWidget):
         self._status.style().unpolish(self._status)
         self._status.style().polish(self._status)
 
-    async def _on_submit(self) -> None:
+    def _on_submit(self, *_args) -> None:
+        """Slot đồng bộ của Qt — lên lịch coroutine xử lý đăng nhập vào event loop."""
+        asyncio.ensure_future(self._handle_submit())
+
+    async def _handle_submit(self) -> None:
         self._submit.setEnabled(False)
         self._submit.setText("Đang kiểm tra...")
         self._set_status("Đang liên hệ máy chủ...")
@@ -153,6 +158,14 @@ class LoginWindow(QWidget):
             self._refresh_submit()
             self._password.selectAll()
             self._password.setFocus()
+            return
+        except Exception as exc:  # noqa: BLE001
+            logger.error("Loi he thong khi dang nhap: %s", exc)
+            msg = f"Lỗi kết nối máy chủ: {exc}"
+            self._set_status(msg, "error")
+            self.login_failed.emit(msg)
+            self._submit.setText("Vào phòng thi")
+            self._refresh_submit()
             return
 
         role_code = ((user.get("role") or {}).get("code") or "").strip().upper()
