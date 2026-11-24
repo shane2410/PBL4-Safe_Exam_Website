@@ -89,9 +89,14 @@ sha_path.write_text(line, encoding='utf-8')
       --workpath "$(winepath -w "$ROOT/build-win")" \
       "$(winepath -w "$HERE/seb_client.spec")"
     cp "$ROOT/.env.example" "$ROOT/dist-win/SEB-Client/.env.example"
+    cp "$HERE/check-windows-qt.ps1" "$ROOT/dist-win/SEB-Client/check-windows-qt.ps1"
 
     WIN_BINARY="$ROOT/dist-win/SEB-Client/SEB-Client.exe"
     WIN_SHA_FILE="$ROOT/dist-win/seb_client.sha256"
+
+    echo "==> Kiểm tra nạp Qt từ bản .exe đã đóng gói..."
+    # The GUI bootloader can show a modal traceback on import failure.
+    timeout 60s wine "$WIN_BINARY" --check-runtime
 
     echo
     echo "==> (c) & (d) Tính và lưu SHA-256 của binary output..."

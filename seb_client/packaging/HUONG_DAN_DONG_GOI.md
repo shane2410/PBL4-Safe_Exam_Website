@@ -57,6 +57,32 @@ log rồi thoát — không có cửa sổ trắng im lặng.
 
 ## 3. Kiểm chứng bản đóng gói
 
+Script build Windows kiểm tra nạp Qt từ chính `SEB-Client.exe` trước khi tạo
+checksum. Để kiểm tra lại trên Windows (PowerShell):
+
+```powershell
+$process = Start-Process -FilePath .\SEB-Client.exe -ArgumentList '--check-runtime' -Wait -PassThru
+$process.ExitCode # 0 nếu nạp được các module khởi động; chưa kiểm tra hiển thị WebEngine
+```
+
+Nếu thấy `DLL load failed while importing QtCore`, hãy giải nén lại **toàn bộ**
+gói vào thư mục mới thay vì chép đè riêng `.exe`. Giữ nguyên `_internal/` cạnh
+file chạy. Nếu vẫn lỗi trên Windows, kiểm tra Microsoft Visual C++ Redistributable
+(2015–2022, đúng kiến trúc của bản build) và gửi lại traceback cùng phiên bản Windows.
+
+Để khoanh vùng DLL lỗi, chạy từ thư mục chứa `SEB-Client.exe` bằng **PowerShell
+64-bit**:
+
+```powershell
+.\check-windows-qt.ps1 | Tee-Object .\qt-diagnostics.txt
+```
+
+Script nằm sẵn trong gói mới. Với gói cũ, chép `packaging/check-windows-qt.ps1`
+vào cạnh `.exe`. Gửi lại `qt-diagnostics.txt` nếu còn lỗi. `Qt6Core.dll` của
+bản này cần ICU của Windows (`icuuc.dll`); nếu probe báo thiếu file đó, kiểm
+tra bản Windows và bản cập nhật hệ thống, không tải DLL rời. Probe chỉ kiểm
+tra bộ nạp DLL, không bảo đảm ứng dụng hoặc WebEngine khởi động được.
+
 | Kiểm tra | Cách làm |
 |---|---|
 | Nạp đúng `.env` | Log dòng `Backend:` / `Exam origin:` khớp giá trị trong `.env` |

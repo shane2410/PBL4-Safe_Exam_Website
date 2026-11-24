@@ -19,7 +19,23 @@ export default function ExamJoin() {
   const handleSubmit = (e) => {
     e.preventDefault()
     const code = roomCode.trim()
-    if (code) navigate(`/exam/room?room=${encodeURIComponent(code)}`)
+    if (!code) return
+
+    const roomUrl = `/exam/room?room=${encodeURIComponent(code)}`
+    if (new URLSearchParams(location.search).get('embedded') === '1') {
+      navigate(`${roomUrl}&embedded=1`)
+      return
+    }
+
+    // Open synchronously during the submit gesture. Browsers can ignore the
+    // popup hint, or block popups entirely; in that case don't strand the user.
+    const examWindow = window.open('', '_blank', 'popup')
+    if (!examWindow) {
+      navigate(roomUrl)
+      return
+    }
+    examWindow.opener = null
+    examWindow.location.replace(new URL(roomUrl, window.location.origin).href)
   }
 
   return (

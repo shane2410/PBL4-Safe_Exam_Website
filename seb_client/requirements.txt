@@ -1,3 +1,4 @@
+# -*- coding: utf-8 -*-
 # SEB Client — đã cài và kiểm chứng trên Python 3.14 / Arch Linux.
 # Số phiên bản ghim cứng: SEB Client là sản phẩm phát hành, không được
 # "nâng cấp linh hoạt" giữa kỳ thi.

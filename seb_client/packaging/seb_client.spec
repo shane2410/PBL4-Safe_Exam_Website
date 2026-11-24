@@ -47,7 +47,14 @@ hiddenimports = [
     "packaging.version",
 ]
 
+binaries = []
 if sys.platform == "win32":
+    from importlib.util import find_spec
+
+    # Windows wheels can ship DLLs next to QtCore.pyd, while QLibraryInfo
+    # points PyInstaller at PySide6/bin. Keep the wheel's DLL layout intact.
+    pyside_dir = Path(find_spec("PySide6").origin).parent
+    binaries.extend((str(dll), "PySide6") for dll in sorted(pyside_dir.glob("*.dll")))
     hiddenimports += ["win32crypt", "win32print", "win32api", "win32con"]
 elif sys.platform.startswith("linux"):
     hiddenimports += ["secretstorage", "jeepney"]
@@ -57,7 +64,7 @@ elif sys.platform == "darwin":
 a = Analysis(
     [str(ROOT / "main.py")],
     pathex=[str(ROOT)],
-    binaries=[],
+    binaries=binaries,
     datas=[],
     hiddenimports=hiddenimports,
     hookspath=[],
