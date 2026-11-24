@@ -117,3 +117,6 @@ Client chỉ cần `startURL`; mọi khoá khác có mặc định thiên về a
 </dict>
 </plist>
 ```
+> **Phòng bật bắt buộc SEB:** chạy SEB Client trực tiếp, đăng nhập bằng tài khoản
+> thí sinh và nhập mã phòng trong ứng dụng. Mở file `.seb` chỉ chạy trình duyệt
+> khóa độc lập, không xác thực thiết bị với backend nên không vào được phòng này.

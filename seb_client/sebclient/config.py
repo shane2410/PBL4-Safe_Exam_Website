@@ -9,8 +9,9 @@ from __future__ import annotations
 
 import os
 import sys
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from pathlib import Path
+from urllib.parse import quote
 
 from dotenv import load_dotenv
 
@@ -63,23 +64,24 @@ class ClientConfig:
     # Dùng `{room_code}` làm chỗ thay thế — tự động được quote an toàn.
     # Muốn trỏ sang bản web khác (bản demo, bản deploy thật, IP của GV) thì chỉ
     # cần sửa biến này, không phải sửa code.
-    exam_url_template: str = os.getenv(
-        "SEB_EXAM_URL_TEMPLATE", DEFAULT_EXAM_ORIGIN + "/exam/room?room={room_code}&embedded=1"
-    )
+    exam_url_template: str | None = None
 
     # Origin nào được phép nạp trong QWebEngineView. Mọi URL ngoài danh sách này
     # sẽ bị navigation_guard chặn — không được để trống, nếu không client mở
     # được bất kỳ trang nào.
-    allowed_origins: tuple[str, ...] = field(
-        default_factory=lambda: tuple(
-            origin.strip().rstrip("/")
-            for origin in os.getenv(
-                "SEB_ALLOWED_ORIGINS",
-                DEFAULT_EXAM_ORIGIN + "," + DEFAULT_BACKEND_URL,
-            ).split(",")
-            if origin.strip()
-        )
-    )
+    allowed_origins: tuple[str, ...] | None = None
+
+    def __post_init__(self) -> None:
+        if self.exam_url_template is None:
+            object.__setattr__(self, "exam_url_template", os.getenv(
+                "SEB_EXAM_URL_TEMPLATE",
+                self.exam_origin + "/exam/room?room={room_code}&embedded=1",
+            ))
+        if self.allowed_origins is None:
+            origins = os.getenv("SEB_ALLOWED_ORIGINS", f"{self.exam_origin},{self.backend_url}")
+            object.__setattr__(self, "allowed_origins", tuple(
+                origin.strip().rstrip("/") for origin in origins.split(",") if origin.strip()
+            ))
 
     log_level: str = os.getenv("SEB_LOG_LEVEL", "INFO").upper()
     log_dir: Path = Path(os.getenv("SEB_LOG_DIR", str(BASE_DIR / "logs")))
@@ -118,7 +120,7 @@ class ClientConfig:
 
     def build_exam_url(self, room_code: str) -> str:
         """Dựng URL trang thi từ template trong cấu hình."""
-        return self.exam_url_template.format(room_code=room_code)
+        return self.exam_url_template.format(room_code=quote(room_code, safe=""))
 
 
 def load_config() -> ClientConfig:

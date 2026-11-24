@@ -214,7 +214,10 @@ def main() -> int:
     client_app.start()
 
     with event_loop:
+        qt_app.lastWindowClosed.connect(event_loop.stop)
         event_loop.run_forever()
+        qt_app.lastWindowClosed.disconnect(event_loop.stop)
+        event_loop.run_until_complete(client_app.shutdown())
 
     logger.info("SEB Client ket thuc")
     return 0

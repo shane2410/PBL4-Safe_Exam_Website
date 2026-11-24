@@ -128,3 +128,11 @@ def test_default_template_carries_embedded_flag():
     server ghi DUPLICATE_LOGIN rồi buộc nộp bài — tức dùng đúng SEB thì bị phạt."""
     config = ClientConfig()
     assert "embedded=1" in config.exam_url_template
+def test_deployed_origins_are_used_when_overrides_are_unset(monkeypatch):
+    from sebclient.config import ClientConfig
+
+    monkeypatch.delenv("SEB_EXAM_URL_TEMPLATE", raising=False)
+    monkeypatch.delenv("SEB_ALLOWED_ORIGINS", raising=False)
+    config = ClientConfig(exam_origin="https://exam.example", backend_url="https://api.example")
+    assert config.allowed_origins == ("https://exam.example", "https://api.example")
+    assert config.build_exam_url("A&B") == "https://exam.example/exam/room?room=A%26B&embedded=1"

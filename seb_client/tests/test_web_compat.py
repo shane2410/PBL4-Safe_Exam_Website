@@ -274,6 +274,19 @@ def test_results_detection_ignored_when_already_blocked(qapp):
     assert blocked_reasons == []
 
 
+def test_native_fallback_exit_button(qapp):
+    from PySide6.QtWidgets import QPushButton
+    from sebclient.ui.blocked_overlay import BlockedOverlay
+
+    overlay = BlockedOverlay("SEB_REQUIRED", title="Không vào được phòng thi")
+    exit_requests = []
+    overlay.exit_requested.connect(lambda: exit_requests.append(True))
+    button = overlay.findChild(QPushButton)
+    assert button.text() == "Thoát SEB"
+    button.click()
+    assert exit_requests == [True]
+
+
 def test_exam_window_on_window_switch_reports_violation():
     """Kiểm tra _on_window_switch gọi đúng VIOLATION_TAB_SWITCH không bị NameError."""
     from sebclient.constants import VIOLATION_TAB_SWITCH
@@ -287,4 +300,3 @@ def test_exam_window_on_window_switch_reports_violation():
     assert len(reported) == 1
     assert reported[0][0] == VIOLATION_TAB_SWITCH
     assert reported[0][1] == {"detected": "os_window_switch"}
-

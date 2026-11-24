@@ -71,6 +71,7 @@ class ExamWindow(QMainWindow):
         self._blocked_overlay = None
         self._device_key = None
         self._attested = False
+        self._attestation_failure = ""
         self._device_id: str | None = None
         self._state: dict | None = None
         self._socket: ExamSocket | None = None
@@ -242,6 +243,7 @@ class ExamWindow(QMainWindow):
 
         result = await ClientAttestor(self._api, self._device_key).attest()
         self._attested = result.attested
+        self._attestation_failure = result.reason
         if result.device_id:
             self._device_id = result.device_id
 
@@ -266,7 +268,10 @@ class ExamWindow(QMainWindow):
             self._state = await self._api.join_exam(self._room_code)
         except Exception as exc:  # noqa: BLE001 - cửa sổ phải sống sót để báo lỗi
             logger.error("Khong vao duoc phong %s: %s", self._room_code, exc)
-            self._set_error(str(exc))
+            message = str(exc)
+            if message == "SEB_REQUIRED" and self._attestation_failure:
+                message = f"Không xác thực được SEB: {self._attestation_failure}"
+            self._set_error(message)
             return False
 
         self._session_token = self._state["session_token"]
@@ -396,14 +401,7 @@ class ExamWindow(QMainWindow):
         self.load_exam_page()
 
     def _set_error(self, message: str) -> None:
-        safe = (
-            message.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
-        )
-        self.web_view.setHtml(
-            "<body style='font-family:sans-serif;padding:40px;background:#f8fafc;color:#0f172a'>"
-            "<h2>Không vào được phòng thi</h2>"
-            f"<p>{safe}</p><p>Vui lòng liên hệ giám thị.</p></body>"
-        )
+        self._show_blocked(message, title="Không vào được phòng thi")
 
     # -------------------------------------------------------------- reporting
 
@@ -474,7 +472,7 @@ class ExamWindow(QMainWindow):
         except Exception as exc:  # noqa: BLE001 - chỉ ghi log, màn hình đã khoá
             logger.error("Nộp bài khi hết giờ thất bại: %s", exc)
 
-    def _show_blocked(self, reason: str) -> None:
+    def _show_blocked(self, reason: str, *, title: str = "Phiên thi đã kết thúc") -> None:
         """Dừng toàn bộ cơ chế giám sát rồi hiện màn hình chặn.
 
         Phải dừng guard trước: phiên đã kết thúc mà vẫn đếm vi phạm thì mọi
@@ -495,16 +493,15 @@ class ExamWindow(QMainWindow):
         # KHÔNG nổi lên trên nó — thử overlay trên view sẽ bị trang web che mất
         # (đã gặp: overlay có hiện nhưng đề thi vẫn nằm đè lên trên).
         # Vì phiên đã kết thúc nên ẩn view là hợp lý và chắc chắn đúng.
-        if self.web_view is not None:
-            self.web_view.setVisible(False)
+        view = self.takeCentralWidget()
+        if view is not None:
+            view.hide()
+            view.setParent(self)
 
-        self._blocked_overlay = BlockedOverlay(reason, parent=self)
-        # Đặt làm central widget để chiếm TRỌN vùng nội dung. `setGeometry` trên
-        # widget con không đủ: layout của overlay tự co lại theo nội dung.
-        # `setCentralWidget` sẽ xoá central widget cũ, nên web_view được giữ
-        # tham chiếu riêng và dọn qua `_release_webengine`.
+        self._blocked_overlay = BlockedOverlay(reason, parent=self, title=title)
+        self._blocked_overlay.exit_requested.connect(self.close)
         self.setCentralWidget(self._blocked_overlay)
-        self._blocked_overlay.show()
+        self.showNormal()
         logger.info("Da hien man hinh chan: %s", reason)
 
     # ------------------------------------------------------------ fullscreen
@@ -525,9 +522,6 @@ class ExamWindow(QMainWindow):
             # xảy ra giữa một coroutine đang chạy, qasync ném RuntimeError.
             # `close_best_effort` đã lưu sẵn event loop nên an toàn ở đây.
             self._socket.close_best_effort()
-        if self._blocked_overlay is not None:
-            self._blocked_overlay.setParent(None)
-            self._blocked_overlay = None
         # Khi đã hiện màn hình chặn thì cho phép đóng thật — nếu không người dùng
         # bị kẹt vĩnh viễn trong một cửa sổ không đóng được.
         self._kiosk_guard._allow_close = True
