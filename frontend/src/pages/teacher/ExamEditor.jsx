@@ -159,10 +159,10 @@ export default function ExamEditor() {
     setError('')
     setSuccess('')
 
-    // Chặn lưu khi tổng điểm câu hỏi lệch tổng điểm đề — GV hay quên chỉnh,
-    // gây ra chấm điểm sai khi thi.
+    // Chặn lưu khi ĐÃ CÓ câu hỏi mà tổng điểm câu hỏi lệch tổng điểm đề — GV hay quên chỉnh,
+    // gây ra chấm điểm sai khi thi. Nếu chưa có câu hỏi (đang tạo khung / chỉnh setting), cho phép lưu.
     const total = selectedQuestions.reduce((sum, q) => sum + (q.score || 0), 0)
-    if (Math.abs(total - Number(exam.total_score || 0)) > 0.001) {
+    if (selectedQuestions.length > 0 && Math.abs(total - Number(exam.total_score || 0)) > 0.001) {
       setError(
         `Tổng điểm các câu hỏi (${total.toFixed(2)}) chưa khớp tổng điểm đề (${exam.total_score}). Hãy chỉnh lại trước khi lưu.`,
       )
@@ -489,13 +489,29 @@ export default function ExamEditor() {
       </div>
 
       {/* Thanh hành động dính đáy */}
-      <div className="fixed bottom-0 right-0 left-[260px] bg-white border-t border-slate-200 px-8 py-3 flex justify-end gap-3">
-        <button type="button" onClick={() => navigate('/teacher/exams')} className="btn-ghost">
-          Huỷ
-        </button>
-        <button type="button" onClick={save} disabled={saving} className="btn-primary">
-          {saving ? 'Đang lưu…' : 'Lưu thay đổi'}
-        </button>
+      <div className="fixed bottom-0 right-0 left-[260px] bg-white border-t border-slate-200 px-8 py-3 flex items-center justify-between gap-4 shadow-sm z-20">
+        <div className="flex-1 min-w-0">
+          {error && (
+            <p className="text-sm font-medium text-error truncate flex items-center gap-1.5" title={error}>
+              <Icon name="warning" size={16} />
+              {error}
+            </p>
+          )}
+          {success && (
+            <p className="text-sm font-medium text-success truncate flex items-center gap-1.5">
+              <Icon name="check" size={16} />
+              {success}
+            </p>
+          )}
+        </div>
+        <div className="flex items-center gap-3 flex-shrink-0">
+          <button type="button" onClick={() => navigate('/teacher/exams')} className="btn-ghost">
+            Huỷ
+          </button>
+          <button type="button" onClick={save} disabled={saving} className="btn-primary">
+            {saving ? 'Đang lưu…' : 'Lưu thay đổi'}
+          </button>
+        </div>
       </div>
       <SubjectModal
         open={subjectOpen}
