@@ -88,7 +88,6 @@ export default function ExamRoom() {
       setState(data)
       setAnswers(data.saved_answers || {})
       setRemaining(data.remaining_seconds)
-      setGateDismissed(false)
       // Vào lại phòng (sau lỗi/retry) là một lượt mới: cho phép tự nộp lại
       // khi đồng hồ về 0, và bỏ khoá chống nộp trùng của lượt trước.
       autoSubmitFiredRef.current = false
