@@ -20,7 +20,7 @@ from app.models.exam_question import ExamQuestion
 from app.models.question import Question
 from app.models.question_option import QuestionOption
 from app.models.subject import Subject
-from app.models.violation_log import ViolationLog
+from app.models.exam_session import ExamSession
 from app.schemas.exam_session_schema import SaveAnswerRequest, SubmitExamRequest
 from app.services.exam_session_service import ExamSessionService
 from app.services.exam_security_service import ExamSecurityService
@@ -58,28 +58,28 @@ def test_web_allowed_when_not_required(db, seeded):
     assert state.restricted_mode is False
 
 
-def test_web_restricted_when_both_flags_on(db, seeded):
+def test_web_blocked_when_both_flags_on(db, seeded):
     exam = seeded["exam"]
     exam.require_safe_browser = True
     SettingsService.set_require_safe_browser_global(db, True, seeded["admin"].id)
     db.commit()
 
-    state = _join(db, seeded)
-    assert state.require_safe_browser is True
-    assert state.restricted_mode is True
+    with pytest.raises(HTTPException) as exc:
+        _join(db, seeded)
+    assert exc.value.status_code == 403
+    assert exc.value.detail == "SEB_REQUIRED"
 
 
-def test_web_restricted_logs_unauthorized_client(db, seeded):
-    """Restricted mode phải để lại bằng chứng phục tra."""
+def test_web_rejection_does_not_create_session(db, seeded):
     exam = seeded["exam"]
     exam.require_safe_browser = True
     SettingsService.set_require_safe_browser_global(db, True, seeded["admin"].id)
     db.commit()
 
-    state = _join(db, seeded)
-    logs = db.query(ViolationLog).filter(ViolationLog.session_id == state.session_id).all()
-    assert len(logs) == 1
-    assert logs[0].event_type == "UNAUTHORIZED_CLIENT"
+    count = db.query(ExamSession).count()
+    with pytest.raises(HTTPException):
+        _join(db, seeded)
+    assert db.query(ExamSession).count() == count
 
 
 def test_attested_seb_client_not_restricted(db, seeded):
@@ -93,15 +93,16 @@ def test_attested_seb_client_not_restricted(db, seeded):
     assert state.restricted_mode is False
 
 
-def test_claiming_seb_without_attestation_stays_restricted(db, seeded):
+def test_claiming_seb_without_attestation_is_blocked(db, seeded):
     """Chỉ KHAI là SEB mà không xác thực -> vẫn bị coi là web (không tin client)."""
     exam = seeded["exam"]
     exam.require_safe_browser = True
     SettingsService.set_require_safe_browser_global(db, True, seeded["admin"].id)
     db.commit()
 
-    state = _join(db, seeded, client_type="seb", attested=False)
-    assert state.restricted_mode is True
+    with pytest.raises(HTTPException) as exc:
+        _join(db, seeded, client_type="seb", attested=False)
+    assert exc.value.detail == "SEB_REQUIRED"
 
 
 def test_allow_web_fallback_false_blocks_unattested_client(db, seeded):
@@ -277,7 +278,7 @@ def _enable_seb_required(db, seeded):
     db.commit()
 
 
-def test_web_inside_seb_still_restricted_without_identity(db, seeded):
+def test_existing_session_cannot_be_rejoined_without_identity(db, seeded):
     """Request không có header định danh vẫn bị coi là web thường.
 
     Đây là hành vi ĐÚNG và phải giữ: nếu server tin trạng thái phiên thì ai có
@@ -291,9 +292,9 @@ def test_web_inside_seb_still_restricted_without_identity(db, seeded):
     state = _join(db, seeded, client_type="seb", attested=True)
     assert state.restricted_mode is False
 
-    # Lần join sau từ webview thiếu header attestation -> vẫn phải restricted.
-    state = _join(db, seeded, client_type="web")
-    assert state.restricted_mode is True
+    with pytest.raises(HTTPException) as exc:
+        _join(db, seeded, client_type="web")
+    assert exc.value.detail == "SEB_REQUIRED"
 
 
 def test_webview_with_identity_headers_not_restricted(db, seeded):
@@ -307,14 +308,20 @@ def test_webview_with_identity_headers_not_restricted(db, seeded):
     assert state.attestation_status == "VERIFIED" if hasattr(state, "attestation_status") else True
 
 
-def test_restricted_mode_logs_unauthorized_client_each_join(db, seeded):
-    """Mỗi lần join không xác thực đều để lại bằng chứng phục tra."""
+def test_seb_session_requires_attestation_to_save_or_submit(db, seeded):
     _enable_seb_required(db, seeded)
-
-    _join(db, seeded, client_type="web")
-    _join(db, seeded, client_type="web")
-
-    count = db.query(ViolationLog).filter(
-        ViolationLog.event_type == "UNAUTHORIZED_CLIENT"
-    ).count()
-    assert count == 2
+    state = _join(db, seeded, client_type="seb", attested=True)
+    assert state.security_policy.allow_web_fallback is False
+    answer = SaveAnswerRequest(
+        session_token=state.session_token,
+        question_id=seeded["question"].id,
+        selected_option_ids=[],
+    )
+    submission = SubmitExamRequest(session_token=state.session_token, submit_type="MANUAL")
+    for service, data in (
+        (ExamSessionService.save_answer, answer),
+        (ExamSessionService.submit_exam, submission),
+    ):
+        with pytest.raises(HTTPException) as exc:
+            service(db, state.session_token, data, current_user=seeded["student"])
+        assert exc.value.detail == "SEB_REQUIRED"

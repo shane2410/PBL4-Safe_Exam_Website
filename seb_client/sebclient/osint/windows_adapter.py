@@ -6,6 +6,7 @@ trong nước. Các cơ chế mạnh nhất nằm ở đây:
 * **Alt+Tab toàn cục**: `RegisterHotKey` chặn ở tầng hệ thống — mạnh hơn nhiều
   so với bắt phím trong cửa sổ riêng.
 * **Ẩn taskbar**: `FindWindow("Shell_TrayWnd")` + `ShowWindow(SW_HIDE)`.
+* **Chỉ dùng chuột trong kiosk**: hook `WH_KEYBOARD_LL` chặn bàn phím thường.
 * **Khoá clipboard**: `OpenClipboard` + `EmptyClipboard` để xoá nội dung.
 
 Vì sao dùng `ctypes.windll` thay vì pywin32:
@@ -50,6 +51,9 @@ WM_HOTKEY = 0x0312
 PM_REMOVE = 0x0001
 SW_HIDE = 0
 SW_SHOW = 5
+WH_KEYBOARD_LL = 13
+HC_ACTION = 0
+_LRESULT = ctypes.c_ssize_t
 
 
 class _MSG(ctypes.Structure):
@@ -108,6 +112,9 @@ class WindowsAdapter:
         self._hotkeys_registered: list[int] = []
         self._callback = None
         self._taskbar_hidden = False
+        self._win_key_hook = None
+        self._win_key_proc = None
+        self._block_win_key = False
         self._monitoring = False
         # HWND thuộc tiến trình này (cửa sổ thi) — dùng để biết thí sinh đã
         # chuyển sang ứng dụng khác hay chưa.
@@ -141,8 +148,8 @@ class WindowsAdapter:
             )
             return False
         try:
-            user32 = ctypes.windll.user32
-            kernel32 = ctypes.windll.kernel32
+            user32 = ctypes.WinDLL("user32", use_last_error=True)
+            kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
             _bind_windows_apis(user32)
             kernel32.GetCurrentProcessId.restype = wintypes.DWORD
             self._user32 = user32
@@ -155,9 +162,47 @@ class WindowsAdapter:
 
     # ------------------------------------------------------------------ kiosk
 
+    def _handle_win_key(self, code, message, data):
+        if self._block_win_key and code == HC_ACTION:
+            # HC_ACTION là sự kiện nhấn/thả phím; hook này không nhận sự kiện chuột.
+            return 1
+        return self._user32.CallNextHookEx(None, code, message, data)
+
+    def _install_win_key_hook(self) -> bool:
+        # KioskGuard gọi trên luồng GUI; vòng lặp Qt bơm message cho hook.
+        if self._win_key_hook is not None:
+            self._block_win_key = True
+            return True
+        try:
+            user32, kernel32 = self._user32, self._kernel32
+            hook_proc = ctypes.WINFUNCTYPE(_LRESULT, ctypes.c_int, wintypes.WPARAM, wintypes.LPARAM)
+            user32.SetWindowsHookExW.argtypes = [ctypes.c_int, hook_proc, wintypes.HMODULE, wintypes.DWORD]
+            user32.SetWindowsHookExW.restype = wintypes.HANDLE
+            user32.CallNextHookEx.argtypes = [wintypes.HANDLE, ctypes.c_int, wintypes.WPARAM, wintypes.LPARAM]
+            user32.CallNextHookEx.restype = _LRESULT
+            user32.UnhookWindowsHookEx.argtypes = [wintypes.HANDLE]
+            user32.UnhookWindowsHookEx.restype = wintypes.BOOL
+            kernel32.GetModuleHandleW.argtypes = [wintypes.LPCWSTR]
+            kernel32.GetModuleHandleW.restype = wintypes.HMODULE
+
+            module = kernel32.GetModuleHandleW(None)
+            if not module:
+                raise ctypes.WinError(ctypes.get_last_error())
+            proc = hook_proc(self._handle_win_key)
+            hook = user32.SetWindowsHookExW(WH_KEYBOARD_LL, proc, module, 0)
+            if not hook:
+                raise ctypes.WinError(ctypes.get_last_error())
+            self._win_key_proc = proc  # Giữ callback sống đến khi tháo hook.
+            self._win_key_hook = hook
+            self._block_win_key = True
+            return True
+        except Exception:
+            logger.warning("Khong cai duoc hook chan ban phim kiosk", exc_info=True)
+            return False
+
     def enter_kiosk(self) -> bool:
-        """Ẩn thanh taskbar. Luôn trả về kết quả thật."""
-        if not self._load():
+        """Chặn bàn phím và thử ẩn taskbar trong thời gian kiosk."""
+        if not self._load() or not self._install_win_key_hook():
             return False
         try:
             hwnd = self._user32.FindWindowW("Shell_TrayWnd", None)
@@ -168,9 +213,17 @@ class WindowsAdapter:
             logger.warning("Khong tim thay taskbar (Shell_TrayWnd)")
         except Exception as exc:  # noqa: BLE001
             logger.warning("Khong an taskbar duoc: %s", exc)
-        return False
+        # KioskGuard vẫn phải gọi exit_kiosk để tháo hook nếu không có taskbar.
+        return True
 
     def exit_kiosk(self) -> None:
+        self._block_win_key = False
+        if self._win_key_hook is not None:
+            if self._user32.UnhookWindowsHookEx(self._win_key_hook):
+                self._win_key_hook = None
+                self._win_key_proc = None
+            else:
+                logger.warning("Khong thao duoc hook ban phim kiosk; da ngung chan phim")
         if self._taskbar_hidden and self._user32 is not None:
             try:
                 hwnd = self._user32.FindWindowW("Shell_TrayWnd", None)

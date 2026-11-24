@@ -23,6 +23,8 @@ from __future__ import annotations
 import ctypes
 import ctypes.wintypes as wintypes
 import sys
+from types import SimpleNamespace
+from unittest.mock import Mock
 
 import pytest
 
@@ -30,6 +32,7 @@ from sebclient.osint.windows_adapter import (
     HOTKEY_ID_ALT_CTRL_TAB,
     HOTKEY_ID_ALT_TAB,
     WM_HOTKEY,
+    WH_KEYBOARD_LL,
     WindowsAdapter,
 )
 
@@ -238,13 +241,57 @@ def test_clear_clipboard_closes_after_success():
     assert fake.clipboard_closed is True
 
 
-def test_enter_and_exit_kiosk_toggle_taskbar():
+@pytest.fixture
+def kiosk_adapter(monkeypatch):
     fake = FakeUser32()
     a = _adapter_with(fake)
+    monkeypatch.setattr(ctypes, "WINFUNCTYPE", ctypes.CFUNCTYPE, raising=False)
+    fake.SetWindowsHookExW = Mock(return_value=123)
+    fake.CallNextHookEx = Mock(return_value=42)
+    fake.UnhookWindowsHookEx = Mock(return_value=True)
+    a._kernel32 = SimpleNamespace(GetModuleHandleW=Mock(return_value=456))
+    return a, fake
+
+
+def test_enter_and_exit_kiosk_toggle_taskbar_and_hook(kiosk_adapter):
+    a, fake = kiosk_adapter
     assert a.enter_kiosk() is True
+    assert a.enter_kiosk() is True
+    fake.SetWindowsHookExW.assert_called_once_with(WH_KEYBOARD_LL, a._win_key_proc, 456, 0)
     assert fake.taskbar_hidden is True
     a.exit_kiosk()
+    a.exit_kiosk()
+    fake.UnhookWindowsHookEx.assert_called_once_with(123)
+    assert a._win_key_proc is None
     assert fake.taskbar_hidden is False
+
+
+def test_keyboard_events_are_swallowed_only_in_kiosk(kiosk_adapter):
+    a, fake = kiosk_adapter
+    assert a.enter_kiosk()
+    proc = a._win_key_proc
+    for message in (0x0100, 0x0101, 0x0104, 0x0105):
+        assert proc(0, message, 0) == 1
+    fake.CallNextHookEx.assert_not_called()
+    assert proc(-1, 0x0100, 0) == 42
+    a.exit_kiosk()
+    assert proc(0, 0x0100, 0) == 42
+
+
+def test_kiosk_removes_hook_even_without_taskbar(kiosk_adapter):
+    a, fake = kiosk_adapter
+    fake.FindWindowW = Mock(return_value=None)
+    assert a.enter_kiosk()
+    a.exit_kiosk()
+    fake.UnhookWindowsHookEx.assert_called_once_with(123)
+
+
+def test_hook_install_failure_does_not_hide_taskbar(kiosk_adapter):
+    a, fake = kiosk_adapter
+    fake.SetWindowsHookExW.side_effect = OSError("hook failed")
+    assert not a.enter_kiosk()
+    assert not fake.taskbar_hidden
+    assert a._win_key_proc is None
 
 
 # --- Nhóm B: Win32 thật (Windows / Wine) ---

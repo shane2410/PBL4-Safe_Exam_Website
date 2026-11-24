@@ -33,7 +33,7 @@ export default function ExamRoom() {
   const [state, setState] = useState(null)
   const [joining, setJoining] = useState(true)
   const [joinError, setJoinError] = useState('')
-  const [gateDismissed, setGateDismissed] = useState(false)
+  const [sebBlocked, setSebBlocked] = useState(false)
 
   const [currentIndex, setCurrentIndex] = useState(0)
   const [answers, setAnswers] = useState({})
@@ -79,6 +79,7 @@ export default function ExamRoom() {
   const join = useCallback(async () => {
     setJoining(true)
     setJoinError('')
+    setSebBlocked(false)
     try {
       const { data } = await apiClient.post('/exam-sessions/join', {
         room_code: roomCode,
@@ -94,7 +95,11 @@ export default function ExamRoom() {
       submittingRef.current = false
       submittedRef.current = false
     } catch (err) {
-      setJoinError(extractErrorMessage(err, 'Không vào được phòng thi.'))
+      if (err?.response?.status === 403 && err.response.data?.detail === 'SEB_REQUIRED') {
+        setSebBlocked(true)
+      } else {
+        setJoinError(extractErrorMessage(err, 'Không vào được phòng thi.'))
+      }
     } finally {
       setJoining(false)
     }
@@ -402,6 +407,10 @@ export default function ExamRoom() {
     )
   }
 
+  if (sebBlocked || (requireSafeBrowser && restrictedMode)) {
+    return <PolicyGate roomCode={roomCode} onRetry={join} />
+  }
+
   if (joinError) {
     return (
       <div className="min-h-screen flex items-center justify-center p-6">
@@ -434,19 +443,6 @@ export default function ExamRoom() {
         <Icon name="refresh" size={20} />
         Đang tải dữ liệu phòng thi…
       </div>
-    )
-  }
-
-  // Đề bắt buộc SEB mà đang dùng web -> hiện PolicyGate
-  if (requireSafeBrowser && restrictedMode && !gateDismissed) {
-    return (
-      <PolicyGate
-        roomCode={state.room_code}
-        canFallback={policy.allow_web_fallback}
-        onRetry={join}
-        onAcceptFallback={() => setGateDismissed(true)}
-        reason={serverNotice}
-      />
     )
   }
 

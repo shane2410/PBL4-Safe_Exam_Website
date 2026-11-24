@@ -56,6 +56,30 @@ def _device_id_from_fingerprint(fingerprint: str | None) -> str | None:
     return fingerprint[:16]
 
 
+SEB_REQUIRED = "SEB_REQUIRED"
+
+
+def _require_seb_for_session(db, session, identity):
+    exam = session.schedule.exam if session.schedule else None
+    if exam is None or not ExamSecurityService.is_safe_browser_required(db, exam):
+        return
+    if not (
+        identity and identity.is_seb and identity.attested
+        and session.attestation_status == "VERIFIED"
+        and identity.device_fingerprint == session.device_fingerprint
+        and identity.client_hash == session.client_hash
+    ):
+        raise HTTPException(status_code=403, detail=SEB_REQUIRED)
+    from app.models.signed_client_release import SignedClientRelease
+    from sqlalchemy import func
+
+    releases = db.query(SignedClientRelease).filter(SignedClientRelease.is_active.is_(True))
+    if releases.first() and not releases.filter(
+        func.lower(SignedClientRelease.hash) == identity.client_hash
+    ).first():
+        raise HTTPException(status_code=403, detail=SEB_REQUIRED)
+
+
 class ExamSessionService:
     @staticmethod
     def join_exam(
@@ -115,11 +139,13 @@ class ExamSessionService:
 
         restricted_mode = seb_required and not is_verified_seb
 
-        if seb_required and not identity.attested and not policy.allow_web_fallback:
+        if seb_required and not (claims_seb and identity.attested):
             raise HTTPException(
                 status_code=status.HTTP_403_FORBIDDEN,
-                detail="Kỳ thi yêu cầu sử dụng Safe Exam Browser và không cho phép làm bài qua trình duyệt web thông thường",
+                detail=SEB_REQUIRED,
             )
+        if seb_required:
+            policy = policy.model_copy(update={"allow_web_fallback": False})
 
         # Check existing session
         session = db.query(ExamSession).filter(
@@ -357,7 +383,8 @@ class ExamSessionService:
         db: Session,
         session_token: str,
         data: SaveAnswerRequest,
-        current_user: User
+        current_user: User,
+        client_identity: Optional[ClientIdentity] = None,
     ) -> dict:
         session = db.query(ExamSession).options(
             joinedload(ExamSession.schedule).joinedload(ExamSchedule.exam)
@@ -375,6 +402,8 @@ class ExamSessionService:
 
         if not session.schedule or not session.schedule.exam:
             raise HTTPException(status_code=500, detail="Đề thi liên kết với ca thi không tồn tại")
+
+        _require_seb_for_session(db, session, client_identity)
 
         # Server-authoritative time: chặn lưu đáp án SAU khi hết giờ.
         # Trước đây chỉ kiểm tra thời gian lúc join, nên gọi API trực tiếp vẫn lưu được.
@@ -447,7 +476,8 @@ class ExamSessionService:
         session_token: str,
         data: SubmitExamRequest,
         current_user: Optional[User] = None,
-        skip_auth_check: bool = False
+        skip_auth_check: bool = False,
+        client_identity: Optional[ClientIdentity] = None,
     ) -> ExamResultResponse:
         session = db.query(ExamSession).options(
             joinedload(ExamSession.student),
@@ -473,6 +503,9 @@ class ExamSessionService:
                     status_code=status.HTTP_403_FORBIDDEN,
                     detail="Bạn không có quyền nộp bài cho phiên thi của thí sinh khác"
                 )
+
+        if not skip_auth_check and current_user is not None:
+            _require_seb_for_session(db, session, client_identity)
 
         try:
             if session.status != "SUBMITTED":

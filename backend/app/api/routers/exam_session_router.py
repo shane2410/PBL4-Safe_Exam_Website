@@ -28,9 +28,7 @@ def join_exam(
     Thí sinh vào phòng thi bằng mã phòng.
     Trả về đề thi với QuestionPublic (KHÔNG có is_correct) + security_policy đã resolve.
 
-    Lưu ý Phase 0: nếu đề bật cờ bắt buộc Safe Exam Browser nhưng client không
-    được xác thực thành công, phiên vẫn được tạo ở `restricted_mode=true` và
-    ghi log UNAUTHORIZED_CLIENT làm bằng chứng phục tra.
+    Đề bắt buộc Safe Exam Browser chỉ cho client SEB đã xác thực vào phòng.
     """
     client_ip = request.client.host if request.client else None
     user_agent = request.headers.get("user-agent")
@@ -72,6 +70,7 @@ def get_session_identity(
 def save_answer(
     data: SaveAnswerRequest,
     db: Session = Depends(get_db),
+    identity: ClientIdentity = Depends(get_client_identity),
     current_user: User = Depends(get_current_user)
 ):
     """Auto-save an individual answer for the active session (verifies user ownership).
@@ -79,12 +78,13 @@ def save_answer(
     `session_token` nằm trong body (`SaveAnswerRequest.session_token`), không phải
     query param — khai báo sai kiểu sẽ khiến mọi lần tự lưu trả 422.
     """
-    return ExamSessionService.save_answer(db, data.session_token, data, current_user=current_user)
+    return ExamSessionService.save_answer(db, data.session_token, data, current_user=current_user, client_identity=identity)
 
 @router.post("/submit", response_model=ExamResultResponse)
 def submit_exam(
     data: SubmitExamRequest,
     db: Session = Depends(get_db),
+    identity: ClientIdentity = Depends(get_client_identity),
     current_user: User = Depends(get_current_user)
 ):
     """Submit exam, finalize session, and trigger automatic grading (verifies user ownership)."""
@@ -93,7 +93,7 @@ def submit_exam(
             status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
             detail="Thiếu session_token",
         )
-    return ExamSessionService.submit_exam(db, data.session_token, data, current_user=current_user)
+    return ExamSessionService.submit_exam(db, data.session_token, data, current_user=current_user, client_identity=identity)
 
 @router.get("/my-results", response_model=List[ExamResultResponse])
 def get_my_results(
